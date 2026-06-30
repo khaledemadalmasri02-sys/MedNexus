@@ -1,0 +1,18 @@
+{
+  "name": "MedNexus — AI Flashcards",
+  "short_name": "MedNexus",
+  "description": "AI-powered flashcard generation with spaced repetition for medical students",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020408",
+  "theme_color": "#020408",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "categories": ["education", "medical", "productivity"]
+}

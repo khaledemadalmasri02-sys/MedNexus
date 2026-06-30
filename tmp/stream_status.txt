@@ -1,0 +1,57 @@
+streamStatus: (
+    jobId: string,
+    onEvent: (event: Record<string, unknown>) => void,
+    onError?: (error: Error) => void
+  ): (() => void) => {
+    const url = `${API_BASE_URL}${SUMMARY_BASE}/status/${jobId}`;
+    let stopped = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastEventCount = 0;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const headers: Record<string, string> = { Accept: "application/json" };
+        const token = getAuthToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+
+        const response = await fetch(url, {
+          headers,
+          credentials: "include",
+        });
+
+        if (!response.ok) {
+          throw new ApiError("Status check failed", "STATUS_ERROR", response.status);
+        }
+
+        const data = await response.json();
+
+        // Emit only new events since last poll
+        const events = (data.events as Array<{ type: string; data: Record<string, unknown>; ts: number }>) || [];
+        const newEvents = events.slice(lastEventCount);
+        lastEventCount = events.length;
+
+        for (const evt of newEvents) {
+          onEvent(evt.data);
+        }
+
+        // If job is still running, poll again
+        if (data.status === "running" || data.status === "pending") {
+          pollTimer = setTimeout(poll, 1500);
+        }
+      } catch (err) {
+        if (!stopped) {
+          onError?.(err as Error);
+        }
+      }
+    };
+
+    // Start polling immediately
+    poll();
+
+    // Return cleanup function
+    return () => {
+      stopped = true;
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  },

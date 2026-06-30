@@ -1,0 +1,74 @@
+import { Router } from "express";
+import authRouter from "./auth.js";
+import decksRouter from "./decks.js";
+import cardsRouter from "./cards.js";
+import healthRouter from "./health.js";
+import terminalRouter from "./terminal.js";
+import generateRouter from "./generate.js";
+import extractRouter from "./extract.js";
+import explainRouter from "./explain.js";
+import explanationsRouter from "./explanations.js";
+import generationsRouter from "./generations.js";
+import qbanksRouter from "./qbanks.js";
+import offlineRouter from "./offline.js";
+import summaryRouter from "./summary.js";
+import errorsRouter from "./errors.js";
+import plannersRouter from "./planners.js";
+import studySessionsRouter from "./study-sessions.js";
+import plannerTemplatesRouter from "./planner-templates.js";
+import notificationsRouter from "./notifications.js";
+import cardProgressRouter from "./card-progress.js";
+import tagsRouter from "./tags.js";
+import importExportRouter from "./import-export.js";
+import aiAnalysisRouter from "./ai-analysis.js";
+import dashboardRouter from "./dashboard.js";
+import settingsRouter from "./settings.js";
+import agentsRouter from "./agents.js";
+import searchRouter from "./search.js";
+import feedbackRouter from "./feedback.js";
+import supportRouter from "./support.js";
+import adminRouter from "./admin.js";
+import backupRouter from "./backup.js";
+import downloadRouter from "./download.js";
+import articleJobsRouter from "./articleJobs.js";
+
+const router = Router();
+
+// Mount existing routes
+router.use(authRouter);
+router.use(decksRouter);
+router.use(cardsRouter);
+router.use(healthRouter);
+router.use(terminalRouter);
+
+// Mount new routes
+router.use("/generate", generateRouter);
+router.use("/extract", extractRouter);
+router.use("/explain", explainRouter);
+router.use("/explanations", explanationsRouter);
+router.use("/generations", generationsRouter);
+router.use("/qbanks", qbanksRouter);
+router.use("/offline", offlineRouter);
+router.use("/summary", summaryRouter);
+router.use("/errors", errorsRouter);
+router.use("/planners", plannersRouter);
+router.use("/study-sessions", studySessionsRouter);
+router.use("/planner-templates", plannerTemplatesRouter);
+router.use("/notifications", notificationsRouter);
+router.use(cardProgressRouter);
+router.use(tagsRouter);
+router.use(importExportRouter);
+router.use(aiAnalysisRouter);
+router.use(dashboardRouter);
+router.use(settingsRouter);
+router.use("/agents", agentsRouter);
+router.use(searchRouter);
+router.use(feedbackRouter);
+router.use("/support", supportRouter);
+router.use("/admin", adminRouter);
+router.use("/backup", backupRouter);
+router.use("/user", backupRouter);
+router.use("/app", downloadRouter);
+router.use(articleJobsRouter);
+
+export default router;
