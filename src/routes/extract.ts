@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
 import { logger } from "../lib/logger.js";
-import { pdfService } from "../lib/pdf";
+import { pdfService } from "../lib/pdf.js";
 import { validateBody } from "../middleware/validate.js";
 import { extractTextSchema } from "./validators.js";
 
@@ -11,7 +11,7 @@ const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB limit
+    fileSize: 100 * 1024 * 1024, // 100MB limit
   },
   fileFilter: (_req, file, cb) => {
     const allowedMimes = [
