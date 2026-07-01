@@ -3,9 +3,12 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+const isProduction = process.env.NODE_ENV === 'production'
+
 export default defineConfig({
   envDir: path.resolve(__dirname, '..'),
   plugins: [react(), tailwindcss()],
+  base: isProduction ? '/' : '/',
   resolve: {
     extensions: ['.tsx', '.ts', '.jsx', '.js', '.mjs', '.json'],
     alias: {
@@ -14,16 +17,18 @@ export default defineConfig({
       'lib/tui-engine': path.resolve(__dirname, './src/lib/tui-engine.ts'),
     },
   },
-server: {
-  proxy: {
-    '/api': {
-      target: 'http://localhost:3001',
-      changeOrigin: false,
-      ws: true,
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: false,
+        ws: true,
+      },
     },
   },
-},
   build: {
+    outDir: 'dist',
+    sourcemap: false,
     rollupOptions: {
       output: {
         manualChunks(id) {

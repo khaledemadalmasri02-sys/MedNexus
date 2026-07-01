@@ -112,14 +112,14 @@ app.use((req, res, next) => {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
     if (!req.cookies?.[CSRF_COOKIE]) {
       const token = crypto.randomBytes(32).toString("hex");
-res.cookie(CSRF_COOKIE, token, {
-  httpOnly: false,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
-  domain: process.env.NODE_ENV === "production" ? undefined : "localhost",
-  path: "/",
-  maxAge: 24 * 60 * 60 * 1000,
-});
+      res.cookie(CSRF_COOKIE, token, {
+        httpOnly: false,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+        domain: process.env.NODE_ENV === "production" ? undefined : "localhost",
+        path: "/",
+        maxAge: 24 * 60 * 60 * 1000,
+      });
       res.locals.csrfToken = token;
     } else {
       res.locals.csrfToken = req.cookies[CSRF_COOKIE];
@@ -152,11 +152,23 @@ app.get("/healthz", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Serve static files from frontend build in production (including Render)
 if (!isDevelopment()) {
+  // On Render, the frontend is built into new-frontend/dist during build
+  // We serve it from the backend so API and frontend share the same domain
   const frontendPath = path.join(__dirname, "../new-frontend/dist");
-  app.use(express.static(frontendPath));
+  app.use(express.static(frontendPath, {
+    maxAge: "1y",
+    etag: true,
+    lastModified: true,
+  }));
 
-  app.get("*", (_req: Request, res: Response) => {
+  // SPA fallback - serve index.html for all non-API routes
+  app.get("*", (req: Request, res: Response, next: NextFunction) => {
+    // Skip API routes
+    if (req.path.startsWith("/api/") || req.path.startsWith("/healthz")) {
+      return next();
+    }
     res.sendFile(path.join(frontendPath, "index.html"));
   });
 }

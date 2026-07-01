@@ -1,0 +1,83 @@
+# Dependencies
+node_modules
+new-frontend/node_modules
+
+# Build outputs
+dist
+new-frontend/dist
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Environment files (secrets should be set in Render dashboard)
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+coverage
+
+# Cache
+.cache
+.eslintcache
+
+# Temp files
+tmp
+*.tmp
+*.temp
+
+# Blender assets and scripts
+blender-scripts
+blender_assets
+
+# APK
+apk
+
+# Three.js scene
+threejs-scene
+
+# TUI engine
+tui_engine
+
+# Workspaces (runtime data)
+workspaces
+
+# Data directories (created at runtime)
+data/sqlite.db
+data/summary_uploads
+data/summary_outputs
+data/backups
+
+# Python files
+*.py
+__pycache__
+
+# Misc
+nginx.conf
+create_fix.py
+debug.py
+debug2.js
+fix_upload.js
+fix_upload_properly.js
+fix_upload_type_issues.sh
+export_character.py
+animejs
+node
+npx
+server.log
+skills-lock.json
+README.md
+SECURITY_HARDENING_PLAN.md
+PLAN.md
