@@ -5,7 +5,7 @@ import path from "path";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { fileURLToPath } from "url";
-import { UPLOAD_DIR, OUTPUT_DIR, validateFileType } from "../middleware/upload.js";
+import { UPLOAD_DIR, OUTPUT_DIR } from "../middleware/upload.js";
 import { logger } from "../lib/logger.js";
 import { getConfig, isDevelopment } from "../config.js";
 
@@ -88,7 +88,7 @@ function createUploadMiddleware(dest: string) {
       },
     }),
     limits: {
-      fileSize: 50 * 1024 * 1024,
+      fileSize: 100 * 1024 * 1024,
       files: 20,
     },
     fileFilter: (_req, file, cb) => {
@@ -125,15 +125,6 @@ router.post("/upload", (req: Request, res: Response) => {
     if (!files || files.length === 0) {
       res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "No files uploaded" } });
       return;
-    }
-
-    for (const f of files) {
-      const valid = await validateFileType(f.path);
-      if (!valid) {
-        fs.unlinkSync(f.path);
-        res.status(400).json({ error: { code: "UPLOAD_ERROR", message: `File ${f.originalname} content does not match its extension` } });
-        return;
-      }
     }
 
     const fileMeta = files.map((f) => ({
