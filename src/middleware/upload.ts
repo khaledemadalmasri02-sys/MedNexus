@@ -101,6 +101,10 @@ export async function validateFileType(filePath: string): Promise<boolean> {
   
   const fileType = await fileTypeFromFile(filePath);
   if (!fileType) {
+    const allowedExts = Object.values(ALLOWED_TYPES).flat();
+    if (allowedExts.includes(ext)) {
+      return true;
+    }
     return false;
   }
   return ALLOWED_MIME_TYPES.has(fileType.mime);
