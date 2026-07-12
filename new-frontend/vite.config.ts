@@ -31,11 +31,12 @@ export default defineConfig({
         configure: (proxy) => {
           proxy.on('error', (err, _req, res) => {
             console.error('[vite-proxy] /api proxy error:', err.message);
-            if (res && typeof res.writeHead === 'function' && !res.headersSent) {
-              res.writeHead(502, { 'Content-Type': 'application/json' });
+            const response = res as unknown as import('http').ServerResponse;
+            if (response && typeof response.writeHead === 'function' && !response.headersSent) {
+              response.writeHead(502, { 'Content-Type': 'application/json' });
             }
-            if (res && typeof res.end === 'function' && !res.writableEnded) {
-              res.end(JSON.stringify({ error: { code: 'PROXY_ERROR', message: 'Backend unreachable' } }));
+            if (response && typeof response.end === 'function' && !response.writableEnded) {
+              response.end(JSON.stringify({ error: { code: 'PROXY_ERROR', message: 'Backend unreachable' } }));
             }
           });
           proxy.on('proxyReq', (proxyReq) => {
