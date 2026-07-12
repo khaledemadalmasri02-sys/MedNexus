@@ -31,6 +31,16 @@ async function main(): Promise<void> {
       logger.info(`API available at http://localhost:${PORT}/api`);
     });
 
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        logger.error(
+          `Port ${PORT} is already in use. Stop the other process or change PORT in your config/env.`
+        );
+        process.exit(1);
+      }
+      throw err;
+    });
+
     // Cache cleanup job — runs hourly
     const cacheCleanupInterval = setInterval(async () => {
       try {

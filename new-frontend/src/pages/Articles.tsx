@@ -94,7 +94,7 @@ export default function Articles() {
     streamCleanupRef.current?.();
     streamCleanupRef.current = api.articlesApi.streamJob(
       job.id,
-      (event, data) => {
+      (_event, data) => {
         const payload = data as { progress?: number; content?: string; status?: string };
         setJobs((prev) =>
           prev.map((j) =>

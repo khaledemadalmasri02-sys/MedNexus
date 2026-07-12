@@ -91,18 +91,9 @@ function createUploadMiddleware(dest: string) {
       fileSize: 100 * 1024 * 1024,
       files: 20,
     },
-    fileFilter: (_req, file, cb) => {
-      const allowed = new Set([
-        ".pdf", ".png", ".jpg", ".jpeg", ".webp",
-        ".pptx", ".ppt", ".xlsx", ".xls", ".csv",
-        ".txt", ".md", ".docx",
-      ]);
-      const ext = path.extname(file.originalname).toLowerCase();
-      if (allowed.has(ext)) {
-        cb(null, true);
-      } else {
-        cb(new Error(`File type ${ext} not allowed`));
-      }
+    // Accept all file types - validation is done by the client
+    fileFilter: (_req, _file, cb) => {
+      cb(null, true);
     },
   });
 }

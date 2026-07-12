@@ -384,20 +384,83 @@ export class AIService {
     }
   }
 
-  // Generate flashcards from text
+  // Split text into chunks small enough to fit the model's context window.
+  private splitIntoChunks(text: string, maxChars: number): string[] {
+    const clean = text.trim();
+    if (!clean) return [];
+    if (clean.length <= maxChars) return [clean];
+
+    // Prefer splitting on paragraph/blank-line boundaries, then sentences,
+    // falling back to hard character cuts for very long unbroken runs.
+    const chunks: string[] = [];
+    let current = "";
+    const paragraphs = clean.split(/\n\s*\n/);
+    for (const para of paragraphs) {
+      if (!para.trim()) continue;
+      if (current.length + para.length + 2 <= maxChars) {
+        current += (current ? "\n\n" : "") + para;
+      } else if (para.length <= maxChars) {
+        if (current) chunks.push(current);
+        current = para;
+      } else {
+        // Paragraph itself is too long: break on sentence boundaries.
+        if (current) {
+          chunks.push(current);
+          current = "";
+        }
+        const sentences = para.match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) || [para];
+        let buf = "";
+        for (const sentence of sentences) {
+          if (buf.length + sentence.length <= maxChars) {
+            buf += sentence;
+          } else {
+            if (buf) chunks.push(buf.trim());
+            buf = sentence.length > maxChars ? sentence.slice(0, maxChars) : sentence;
+          }
+        }
+        if (buf) current = buf.trim();
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  }
+
+  // Generate flashcards from text (cards only, no explanations)
   async generateCards(
     text: string,
     cardCount: number = 10,
     options: GenerateOptions = {}
   ): Promise<GeneratedCard[]> {
     const model = options.model || this.config.AI_TEXT_MODEL;
-
     const errorContext = await errorLearningService.buildErrorContextAsync(
       "generateCards",
       model
     );
 
-    const systemPrompt = `You are an expert flashcard creator. Generate ${cardCount} high-quality flashcards from the provided text.
+    // Large inputs (e.g. uploaded files) can exceed the model's context
+    // window. Split into safe chunks and generate per chunk so the request
+    // always fits and AI is actually used instead of the offline fallback.
+    const sanitized = this.sanitizePromptInput(text);
+    const chunks = this.splitIntoChunks(sanitized, 4000);
+    if (chunks.length === 0) return [];
+
+    const perChunk = Math.max(1, Math.ceil(cardCount / chunks.length));
+    const all: GeneratedCard[] = [];
+    for (const chunk of chunks) {
+      const cards = await this.generateCardsChunk(chunk, perChunk, options, model, errorContext.instructions);
+      all.push(...cards);
+    }
+    return all;
+  }
+
+  private async generateCardsChunk(
+    chunk: string,
+    count: number,
+    options: GenerateOptions,
+    model: string,
+    extraInstructions?: string
+  ): Promise<GeneratedCard[]> {
+    const systemPrompt = `You are an expert flashcard creator. Generate ${count} high-quality flashcards from the provided text.
 Rules:
 - Each card should test one key concept
 - Front side: A clear question or prompt
@@ -412,9 +475,9 @@ Return ONLY a valid JSON array in this format:
     "back": "Answer",
     "tags": ["tag1", "tag2"]
   }
-]${errorContext.instructions ? "\n\n" + errorContext.instructions : ""}`;
+]${extraInstructions ? "\n\n" + extraInstructions : ""}`;
 
-    const userPrompt = `Generate ${cardCount} flashcards from this text:\n\n${this.sanitizePromptInput(text)}`;
+    const userPrompt = `Generate ${count} flashcards from this text:\n\n${chunk}`;
 
     const response = await this.complete([
       { role: "system", content: systemPrompt },
@@ -460,13 +523,32 @@ Return ONLY a valid JSON array in this format:
     options: GenerateOptions = {}
   ): Promise<GeneratedQuestion[]> {
     const model = options.model || this.config.AI_QBANK_MODEL;
-
     const errorContext = await errorLearningService.buildErrorContextAsync(
       "generateQuestions",
       model
     );
 
-    const systemPrompt = `You are an expert question bank creator for medical/educational exams. Generate ${questionCount} high-quality multiple-choice questions from the provided text.
+    const sanitized = this.sanitizePromptInput(text);
+    const chunks = this.splitIntoChunks(sanitized, 4000);
+    if (chunks.length === 0) return [];
+
+    const perChunk = Math.max(1, Math.ceil(questionCount / chunks.length));
+    const all: GeneratedQuestion[] = [];
+    for (const chunk of chunks) {
+      const questions = await this.generateQuestionsChunk(chunk, perChunk, options, model, errorContext.instructions);
+      all.push(...questions);
+    }
+    return all;
+  }
+
+  private async generateQuestionsChunk(
+    chunk: string,
+    count: number,
+    options: GenerateOptions,
+    model: string,
+    extraInstructions?: string
+  ): Promise<GeneratedQuestion[]> {
+    const systemPrompt = `You are an expert question bank creator for medical/educational exams. Generate ${count} high-quality multiple-choice questions from the provided text.
 Rules:
 - Each question should test clinical reasoning or key knowledge
 - Include a clinical vignette when appropriate
@@ -483,9 +565,9 @@ Return ONLY a valid JSON array in this format:
     "correctIndex": 0,
     "explanation": "Detailed explanation of why the correct answer is right and others are wrong"
   }
-]${errorContext.instructions ? "\n\n" + errorContext.instructions : ""}`;
+]${extraInstructions ? "\n\n" + extraInstructions : ""}`;
 
-    const userPrompt = `Generate ${questionCount} multiple-choice questions from this text:\n\n${this.sanitizePromptInput(text)}`;
+    const userPrompt = `Generate ${count} multiple-choice questions from this text:\n\n${chunk}`;
 
     const response = await this.complete([
       { role: "system", content: systemPrompt },

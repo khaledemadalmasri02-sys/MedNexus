@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Printer, Copy, Check, AlertTriangle, Loader2, Clock, FileText, Layers, Tag, Stethoscope } from "lucide-react";
+import { ArrowLeft, Printer, Copy, Check, AlertTriangle, Clock, FileText, Layers, Tag } from "lucide-react";
 import type { ArticleJob } from "../lib/api";
 import ArticleReader, { type ArticleMeta } from "../components/article/ArticleReader";
 import ArticleToc, { parseToc } from "../components/article/ArticleToc";

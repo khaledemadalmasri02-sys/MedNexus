@@ -16,6 +16,8 @@ services:
         fromDatabase:
           name: mednexus-db
           property: connectionString
+      - key: APP_URL
+        value: https://mednexus-api.onrender.com
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENAI_API_KEY
@@ -29,8 +31,6 @@ services:
       - key: ADMIN_SECRET_KEY
         generateValue: true
       - key: ADMIN_IP_ALLOWLIST
-        sync: false
-      - key: APP_URL
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
@@ -49,22 +49,10 @@ services:
       - key: SMTP_SECURE
         sync: false
 
-  - type: web
-    name: mednexus-frontend
-    env: static
-    region: oregon
-    plan: free
-    buildCommand: cd new-frontend && npm ci && npm run build
-    staticPublishPath: ./new-frontend/dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      - key: VITE_API_URL
-        value: https://mednexus-api.onrender.com
-      - key: VITE_GOOGLE_CLIENT_ID
-        sync: false
+  # The frontend is built by the mednexus-api build (render-build.sh) into
+  # new-frontend/dist and served by the backend itself (src/app.ts). This keeps
+  # the UI and /api on the SAME origin, so uploads no longer hit a separate
+  # domain (which caused cold-start hangs behind the free-tier static site).
 
 databases:
   - name: mednexus-db

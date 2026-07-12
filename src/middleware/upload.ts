@@ -2,7 +2,16 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
-import { fileTypeFromFile } from "file-type";
+// file-type imports - use dynamic import for ES module compatibility
+let fileTypeFromFile: any = null;
+
+async function loadFileTypeLib() {
+  if (!fileTypeFromFile) {
+    const { fileTypeFromFile: loaded } = await import("file-type");
+    fileTypeFromFile = loaded;
+  }
+  return fileTypeFromFile;
+}
 
 const UPLOAD_DIR = "./data/summary_uploads";
 const OUTPUT_DIR = "./data/summary_outputs";
@@ -99,15 +108,19 @@ export async function validateFileType(filePath: string): Promise<boolean> {
     return isTextFile(filePath);
   }
   
-  const fileType = await fileTypeFromFile(filePath);
-  if (!fileType) {
+  try {
+    const fileTypeLib = await loadFileTypeLib();
+    const result = await fileTypeLib(filePath);
+    return result !== null && ALLOWED_MIME_TYPES.has(result.mime);
+  } catch (error) {
+    console.warn("File type validation failed:", error);
+    
     const allowedExts = Object.values(ALLOWED_TYPES).flat();
     if (allowedExts.includes(ext)) {
       return true;
     }
     return false;
   }
-  return ALLOWED_MIME_TYPES.has(fileType.mime);
 }
 
 export { UPLOAD_DIR, OUTPUT_DIR };

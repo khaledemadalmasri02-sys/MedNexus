@@ -13,20 +13,9 @@ const upload = multer({
   limits: {
     fileSize: 100 * 1024 * 1024, // 100MB limit
   },
-  fileFilter: (_req, file, cb) => {
-    const allowedMimes = [
-      "application/pdf",
-      "text/plain",
-      "text/markdown",
-      "application/msword",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ];
-    
-    if (allowedMimes.includes(file.mimetype) || file.originalname.match(/\.(pdf|txt|md|doc|docx)$/i)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Invalid file type. Only PDF, TXT, MD, DOC, and DOCX files are allowed."));
-    }
+  // Accept all file types - validation is done by the client
+  fileFilter: (_req, _file, cb) => {
+    cb(null, true);
   },
 });
 

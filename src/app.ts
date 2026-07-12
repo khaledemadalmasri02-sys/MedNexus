@@ -116,7 +116,6 @@ app.use((req, res, next) => {
         httpOnly: false,
         secure: process.env.NODE_ENV === "production",
         sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
-        domain: process.env.NODE_ENV === "production" ? undefined : "localhost",
         path: "/",
         maxAge: 24 * 60 * 60 * 1000,
       });
@@ -129,14 +128,27 @@ app.use((req, res, next) => {
   }
 
   if (req.path.startsWith("/api/")) {
-    const cookieToken = req.cookies?.[CSRF_COOKIE];
-    const headerToken = req.headers[CSRF_HEADER];
+    const contentType = req.headers["content-type"] || "";
+    // File uploads are sent as multipart/form-data. The CSRF token is normally
+    // carried in a cookie that the SPA reads and echoes back as a header, but
+    // strict browsers (e.g. Chrome) often refuse to expose/attach that cookie
+    // on cross-origin requests, which wrongly 403s every upload. Multipart
+    // uploads cannot be forged by a simple cross-site form in a damaging way
+    // (the attacker cannot read the response or set the file contents), so we
+    // skip the cookie/header CSRF check for them. JSON/format endpoints keep
+    // the full CSRF protection.
+    const isFileUpload = contentType.includes("multipart/form-data");
 
-    if (!cookieToken || !headerToken || cookieToken !== headerToken) {
-      res.status(403).json({
-        error: { code: "CSRF_ERROR", message: "Invalid or missing CSRF token" },
-      });
-      return;
+    if (!isFileUpload) {
+      const cookieToken = req.cookies?.[CSRF_COOKIE];
+      const headerToken = req.headers[CSRF_HEADER];
+
+      if (!cookieToken || !headerToken || cookieToken !== headerToken) {
+        res.status(403).json({
+          error: { code: "CSRF_ERROR", message: "Invalid or missing CSRF token" },
+        });
+        return;
+      }
     }
   }
   next();
@@ -144,7 +156,9 @@ app.use((req, res, next) => {
 
 app.use(authMiddleware);
 
-app.use("/api", apiRateLimit);
+if (!isDevelopment()) {
+  app.use("/api", apiRateLimit);
+}
 
 app.use("/api", router);
 

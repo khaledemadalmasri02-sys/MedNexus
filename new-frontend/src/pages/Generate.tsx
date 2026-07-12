@@ -115,6 +115,9 @@ export default function Generate() {
         },
       );
       setText((prev) => prev + (prev ? "\n\n" : "") + result.text);
+      // Auto-fill the deck name from the first uploaded file so the Generate
+      // button isn't left disabled after a successful upload.
+      setDeckName((prev) => prev.trim() || fileArray[0]?.name.replace(/\.[^.]+$/, "") || "");
       setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, status: "done", progress: 100 } : f));
       setProgress((prev) => [...prev, `Extracted ${result.wordCount} words from ${result.pageCount} pages across ${result.fileCount} files`]);
     } catch (err) {

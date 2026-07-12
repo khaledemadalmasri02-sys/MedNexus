@@ -89,7 +89,14 @@ export function useSummaryGeneration() {
     );
 
     try {
-      const result = await api.summaryApi.upload(pending.map((f) => f.file));
+      const result = await api.summaryApi.upload(
+        pending.map((f) => f.file),
+        (p) => {
+          setFiles((prev) =>
+            prev.map((f) => (f.status === "uploading" ? { ...f, progress: p } : f))
+          );
+        }
+      );
       const uploadedIds = result.files.map((sf) => sf.id);
 
       setFiles((prev) => {

@@ -6,10 +6,9 @@ import {
   Camera, Mic, Users, Stethoscope, Sparkles, ArrowRight, BookOpen,
   Search, X, Zap, Clock, BarChart3, Star, ThumbsUp, ThumbsDown,
   Pin, PinOff, ChevronDown, ChevronUp, HelpCircle, Play,
-  MessageSquare, Wand2, AlertCircle, Activity, ArrowLeftRight,
+  MessageSquare, Wand2, AlertCircle, ArrowLeftRight,
   Layers, GitBranch, Sun, Moon, Coffee, MoonIcon,
-  Flame, CheckCircle, XCircle, Bell, UsersRound, LightbulbIcon,
-  Gauge, Info, Sparkle, Target, Trophy, CircleDot,
+  Flame, Bell,
 } from "lucide-react";
 import { staggerContainer, listItem } from "../components/ui/constants";
 
@@ -47,6 +46,8 @@ type Agent = {
   healthLastIncident: string;
   healthStatus: "healthy" | "degraded" | "down";
 };
+
+type RecommendedAgent = Agent & { reason: string };
 
 const agentHealthData: Record<string, { responseTime: string; uptime: string; lastIncident: string; status: "healthy" | "degraded" | "down" }> = {
   "/chat": { responseTime: "120ms", uptime: "99.9%", lastIncident: "5 days ago", status: "healthy" },
@@ -114,20 +115,6 @@ const agentStreaks: Record<string, number> = {
   "/articles": 0,
 };
 
-const agentTips: Record<string, string> = {
-  "/chat": "Pro tip: Use specific topics in your questions for better answers",
-  "/smart-review": "Pro tip: Review daily for maximum retention",
-  "/exam": "Pro tip: Take exams under timed conditions for best results",
-  "/summarize": "Pro tip: Upload PDFs with clear section headings",
-  "/mnemonics": "Pro tip: Visual mnemonics work best for anatomy",
-  "/coach": "Pro tip: Check your coach weekly for progress insights",
-  "/image-analyze": "Pro tip: High-resolution images yield better results",
-  "/voice-study": "Pro tip: Speak clearly and at moderate pace",
-  "/group-study": "Pro tip: Invite 3-5 peers for optimal collaboration",
-  "/deck/1/doctor": "Pro tip: Audit your deck monthly for quality",
-  "/articles": "Pro tip: Use decks with 20+ cards for richer articles",
-};
-
 const agentDifficulty: Record<string, { level: "beginner" | "intermediate" | "advanced"; label: string }> = {
   "/chat": { level: "beginner", label: "Beginner" },
   "/smart-review": { level: "intermediate", label: "Intermediate" },
@@ -142,33 +129,12 @@ const agentDifficulty: Record<string, { level: "beginner" | "intermediate" | "ad
   "/articles": { level: "advanced", label: "Advanced" },
 };
 
-const agentRequirements: Record<string, { requirement: string; met: boolean }[]> = {
-  "/chat": [{ requirement: "Account created", met: true }],
-  "/smart-review": [{ requirement: "At least 10 cards studied", met: true }, { requirement: "Study history available", met: true }],
-  "/exam": [{ requirement: "Deck with 20+ cards", met: false }],
-  "/summarize": [{ requirement: "PDF or text input", met: true }],
-  "/mnemonics": [{ requirement: "Cards or concept provided", met: true }],
-  "/coach": [{ requirement: "3+ days of study data", met: false }],
-  "/image-analyze": [{ requirement: "Medical image file", met: true }],
-  "/voice-study": [{ requirement: "Microphone access", met: true }, { requirement: "Cards available", met: true }],
-  "/group-study": [{ requirement: "Internet connection", met: true }],
-  "/deck/1/doctor": [{ requirement: "Deck with 5+ cards", met: true }],
-  "/articles": [{ requirement: "Deck with 20+ cards", met: false }],
-};
-
 const agentNotifications: Record<string, { message: string; type: "new" | "update" | "reminder" }[]> = {
   "/chat": [{ message: "New: Academic mode now supports citations", type: "update" }],
   "/smart-review": [{ message: "Your review session is ready!", type: "reminder" }],
   "/exam": [{ message: "New: Clinical vignette questions added", type: "new" }],
   "/image-analyze": [{ message: "New: Now supports radiology scans", type: "new" }],
   "/group-study": [{ message: "3 classmates used this today", type: "update" }],
-};
-
-const agentProgress: Record<string, { label: string; percentage: number }> = {
-  "/deck/1/doctor": { label: "Deck audit", percentage: 40 },
-  "/exam": { label: "Last exam", percentage: 0 },
-  "/smart-review": { label: "Cards due", percentage: 65 },
-  "/coach": { label: "Weekly goal", percentage: 80 },
 };
 
 const agents: Agent[] = [
@@ -181,6 +147,12 @@ const agents: Agent[] = [
     examplePrompt: "Explain the mechanism of action of ACE inhibitors",
     quickActionLabel: "Ask a question", quickActionIcon: MessageSquare,
     emptyStateMessage: "Start by creating a deck, then come back to chat with me about your cards.",
+    inputDescription: "A question or topic",
+    outputDescription: "Detailed explanation with markdown formatting",
+    healthResponseTime: "120ms",
+    healthUptime: "99.9%",
+    healthLastIncident: "5 days ago",
+    healthStatus: "healthy",
   },
   {
     to: "/smart-review", icon: Brain, label: "Smart Review",
@@ -191,6 +163,12 @@ const agents: Agent[] = [
     examplePrompt: "Start a review session for my weakest cards",
     quickActionLabel: "Start review", quickActionIcon: Play,
     emptyStateMessage: "Study some cards first, then I'll identify your weak areas.",
+    inputDescription: "Your study history & cards",
+    outputDescription: "Prioritized card queue for review",
+    healthResponseTime: "350ms",
+    healthUptime: "99.7%",
+    healthLastIncident: "2 days ago",
+    healthStatus: "healthy",
   },
   {
     to: "/exam", icon: GraduationCap, label: "Exam Simulator",
@@ -201,6 +179,12 @@ const agents: Agent[] = [
     examplePrompt: "Generate a 50-question exam from my cardiology deck",
     quickActionLabel: "Generate exam", quickActionIcon: Wand2,
     emptyStateMessage: "Add cards to a deck first to generate exams from your material.",
+    inputDescription: "Select decks + question count",
+    outputDescription: "Timed exam with scoring & analytics",
+    healthResponseTime: "280ms",
+    healthUptime: "99.8%",
+    healthLastIncident: "1 week ago",
+    healthStatus: "healthy",
   },
   {
     to: "/summarize", icon: FileText, label: "Summarizer",
@@ -211,6 +195,12 @@ const agents: Agent[] = [
     examplePrompt: "Summarize this pharmacology chapter into key points",
     quickActionLabel: "Summarize content", quickActionIcon: FileText,
     emptyStateMessage: "Upload a PDF or paste notes to get started.",
+    inputDescription: "PDF or text notes",
+    outputDescription: "Structured summary + suggested flashcards",
+    healthResponseTime: "1.2s",
+    healthUptime: "98.5%",
+    healthLastIncident: "3 days ago",
+    healthStatus: "degraded",
   },
   {
     to: "/mnemonics", icon: Lightbulb, label: "Mnemonics",
@@ -221,6 +211,12 @@ const agents: Agent[] = [
     examplePrompt: "Create a mnemonic for the cranial nerves",
     quickActionLabel: "Generate mnemonic", quickActionIcon: Wand2,
     emptyStateMessage: "Select cards or enter a concept to generate mnemonics.",
+    inputDescription: "Concept or card IDs",
+    outputDescription: "Creative mnemonics (acronym, story, rhyme)",
+    healthResponseTime: "180ms",
+    healthUptime: "99.9%",
+    healthLastIncident: "2 weeks ago",
+    healthStatus: "healthy",
   },
   {
     to: "/coach", icon: TrendingUp, label: "Progress Coach",
@@ -231,6 +227,12 @@ const agents: Agent[] = [
     examplePrompt: "Show my study progress and recommend focus areas",
     quickActionLabel: "View analytics", quickActionIcon: BarChart3,
     emptyStateMessage: "Study for a few days to unlock personalized analytics.",
+    inputDescription: "Study history data",
+    outputDescription: "Analytics dashboard + weekly plan",
+    healthResponseTime: "420ms",
+    healthUptime: "99.6%",
+    healthLastIncident: "4 days ago",
+    healthStatus: "healthy",
   },
   {
     to: "/image-analyze", icon: Camera, label: "Image AI",
@@ -241,6 +243,12 @@ const agents: Agent[] = [
     examplePrompt: "Analyze this ECG image and explain the findings",
     quickActionLabel: "Upload image", quickActionIcon: Camera,
     emptyStateMessage: "Upload a medical image to generate teaching points.",
+    inputDescription: "Medical image upload",
+    outputDescription: "Findings + teaching flashcards",
+    healthResponseTime: "2.1s",
+    healthUptime: "97.8%",
+    healthLastIncident: "1 day ago",
+    healthStatus: "degraded",
   },
   {
     to: "/voice-study", icon: Mic, label: "Voice Tutor",
@@ -251,6 +259,12 @@ const agents: Agent[] = [
     examplePrompt: "Quiz me on pharmacology using voice",
     quickActionLabel: "Start voice session", quickActionIcon: Mic,
     emptyStateMessage: "Connect a microphone and add cards to start voice study.",
+    inputDescription: "Spoken answer via microphone",
+    outputDescription: "Accuracy score + detailed feedback",
+    healthResponseTime: "550ms",
+    healthUptime: "99.4%",
+    healthLastIncident: "6 days ago",
+    healthStatus: "healthy",
   },
   {
     to: "/group-study", icon: Users, label: "Group Study",
@@ -261,6 +275,12 @@ const agents: Agent[] = [
     examplePrompt: "Create a group study room for anatomy",
     quickActionLabel: "Create room", quickActionIcon: Users,
     emptyStateMessage: "Invite friends to study together in real-time.",
+    inputDescription: "Room ID or create new room",
+    outputDescription: "Shared quiz session with peers",
+    healthResponseTime: "200ms",
+    healthUptime: "99.0%",
+    healthLastIncident: "1 week ago",
+    healthStatus: "healthy",
   },
   {
     to: "/deck/1/doctor", icon: Stethoscope, label: "Deck Doctor",
@@ -271,6 +291,12 @@ const agents: Agent[] = [
     examplePrompt: "Audit my deck for quality issues",
     quickActionLabel: "Audit deck", quickActionIcon: Stethoscope,
     emptyStateMessage: "Create a deck first to run a quality audit.",
+    inputDescription: "Deck ID to analyze",
+    outputDescription: "Health report + fix suggestions",
+    healthResponseTime: "310ms",
+    healthUptime: "99.8%",
+    healthLastIncident: "3 days ago",
+    healthStatus: "healthy",
   },
   {
     to: "/articles", icon: BookOpen, label: "Articles",
@@ -281,6 +307,12 @@ const agents: Agent[] = [
     examplePrompt: "Write an article on heart failure based on my deck",
     quickActionLabel: "Write article", quickActionIcon: BookOpen,
     emptyStateMessage: "Add cards to generate articles from your material.",
+    inputDescription: "Deck topics & material",
+    outputDescription: "Long-form article with LaTeX + quizzes",
+    healthResponseTime: "1.8s",
+    healthUptime: "98.2%",
+    healthLastIncident: "5 days ago",
+    healthStatus: "degraded",
   },
 ];
 
@@ -426,7 +458,6 @@ function AgentCard({
   const Icon = agent.icon;
   const QuickActionIcon = agent.quickActionIcon;
   const isFeatured = agent.featured;
-  const health = agentHealthData[agent.to];
   const io = agentIOData[agent.to];
 
   const handleCardClick = () => {
@@ -944,7 +975,7 @@ function SearchAndFilter({
   );
 }
 
-function RecommendedSection({ agents: recommended }: { agents: Agent[] }) {
+function RecommendedSection({ agents: recommended }: { agents: RecommendedAgent[] }) {
   if (recommended.length === 0) return null;
 
   return (
@@ -1114,41 +1145,7 @@ function OnboardingTour({
   );
 }
 
-function HealthIndicator({ agentId }: { agentId: string }) {
-  const health = agentHealthData[agentId];
-  if (!health) return null;
-
-  const color = health.status === "healthy" ? "#22C55E" : health.status === "degraded" ? "#F59E0B" : "#EF4444";
-
-  return (
-    <div className="relative group">
-      <div
-        className="w-2 h-2 rounded-full"
-        style={{ background: color, boxShadow: `0 0 4px ${color}` }}
-      />
-      <div
-        className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 rounded-lg text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50"
-        style={{
-          background: "rgba(20,20,30,0.95)",
-          border: "1px solid rgba(255,255,255,0.1)",
-          color: "var(--text-primary)",
-        }}
-      >
-        <div className="flex items-center gap-2 mb-1">
-          <Activity style={{ width: 10, height: 10, color }} />
-          <span className="font-medium">Health</span>
-        </div>
-        <div style={{ color: "var(--text-muted)" }}>
-          <div>Response: {health.responseTime}</div>
-          <div>Uptime: {health.uptime}</div>
-          <div>Last incident: {health.lastIncident}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CompareBar({
+  function CompareBar({
   selectedAgents,
   onClear,
   onCompare,
@@ -1549,7 +1546,6 @@ function WorkflowSection() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {workflows.map((workflow) => {
           const WorkflowIcon = workflow.icon;
-          const firstAgent = agents.find((a) => a.to === workflow.agents[0]);
           return (
             <Link
               key={workflow.id}
@@ -1689,90 +1685,6 @@ function NotificationBadge({ agentId }: { agentId: string }) {
       >
         {notification.message}
       </div>
-    </div>
-  );
-}
-
-function RequirementsChecklist({ agentId }: { agentId: string }) {
-  const requirements = agentRequirements[agentId];
-  if (!requirements) return null;
-
-  return (
-    <div className="flex items-center gap-2 flex-wrap">
-      {requirements.map((req, i) => (
-        <div key={i} className="flex items-center gap-1">
-          {req.met ? (
-            <CheckCircle style={{ width: 8, height: 8, color: "#22C55E" }} />
-          ) : (
-            <XCircle style={{ width: 8, height: 8, color: "#6B7280" }} />
-          )}
-          <span className="text-[0.6rem]" style={{ color: req.met ? "#22C55E" : "var(--text-muted)" }}>
-            {req.requirement}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ProgressIndicator({ agentId }: { agentId: string }) {
-  const progress = agentProgress[agentId];
-  if (!progress) return null;
-
-  return (
-    <div className="mt-2">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-[0.6rem]" style={{ color: "var(--text-muted)" }}>{progress.label}</span>
-        <span className="text-[0.6rem] font-medium" style={{ color: "var(--text-primary)" }}>{progress.percentage}%</span>
-      </div>
-      <div className="w-full h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.08)" }}>
-        <div
-          className="h-full rounded-full"
-          style={{
-            width: `${progress.percentage}%`,
-            background: progress.percentage >= 70 ? "linear-gradient(90deg, #22C55E, #16A34A)" :
-              progress.percentage >= 40 ? "linear-gradient(90deg, #F59E0B, #D97706)" :
-              "linear-gradient(90deg, #3B82F6, #2563EB)",
-          }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ProTipCard({ agentId }: { agentId: string }) {
-  const tip = agentTips[agentId];
-  if (!tip) return null;
-
-  return (
-    <div
-      className="flex items-start gap-2 px-3 py-2 rounded-lg"
-      style={{
-        background: "rgba(139,92,246,0.08)",
-        border: "1px solid rgba(139,92,246,0.15)",
-      }}
-    >
-      <LightbulbIcon style={{ width: 10, height: 10, color: "#8B5CF6", marginTop: 2, flexShrink: 0 }} />
-      <span className="text-[0.65rem]" style={{ color: "var(--text-muted)", lineHeight: 1.4 }}>{tip}</span>
-    </div>
-  );
-}
-
-function SocialPresenceIndicator({ agentId }: { agentId: string }) {
-  const notifications = agentNotifications[agentId];
-  const socialNotification = notifications?.find(n => n.message.includes("classmates"));
-  if (!socialNotification) return null;
-
-  return (
-    <div
-      className="flex items-center gap-1.5 px-2 py-1 rounded-lg"
-      style={{
-        background: "rgba(6,182,212,0.1)",
-        border: "1px solid rgba(6,182,212,0.2)",
-      }}
-    >
-      <UsersRound style={{ width: 10, height: 10, color: "#06B6D4" }} />
-      <span className="text-[0.6rem]" style={{ color: "#06B6D4" }}>{socialNotification.message}</span>
     </div>
   );
 }
@@ -2095,7 +2007,7 @@ export default function AgentsPage() {
       .map((a) => ({
         ...a,
         reason: recommendedAgents.find((r) => r.agentId === a.to)?.reason || "",
-      }));
+      })) as RecommendedAgent[];
   }, []);
 
   const compareAgentsData = useMemo(() => {

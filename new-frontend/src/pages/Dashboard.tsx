@@ -58,7 +58,7 @@ const defaultConfig: DashboardConfig = {
   accentColor: "cyan",
 };
 
-function AnimatedStatCard({ label, value, icon: Icon, color, bg, index }: { label: string; value: number; icon: typeof Layers; color: string; bg: string; index: number }) {
+function AnimatedStatCard({ label, value, icon: Icon, color, bg }: { label: string; value: number; icon: typeof Layers; color: string; bg: string }) {
   return (
     <motion.div
       variants={item}
@@ -358,8 +358,8 @@ export default function Dashboard() {
               initial="hidden"
               animate="visible"
             >
-              {statCards.map(({ label, value, icon: Icon, color, bg }, i) => (
-                <AnimatedStatCard key={label} label={label} value={value} icon={Icon} color={color} bg={bg} index={i} />
+              {statCards.map(({ label, value, icon: Icon, color, bg }) => (
+                <AnimatedStatCard key={label} label={label} value={value} icon={Icon} color={color} bg={bg} />
               ))}
             </motion.div>
           </div>

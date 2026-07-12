@@ -10,17 +10,28 @@ import { generateSchema } from "./validators.js";
 
 const router = Router();
 
-// Check if error should trigger offline fallback
+// Check if error should trigger offline fallback.
+// IMPORTANT: only genuine availability/auth/quota problems should fall back to
+// the offline generator. Transient rate limits (429) are included, but a plain
+// "limit exceeded" is deliberately excluded because OpenRouter also returns
+// "maximum context length exceeded" for oversized prompts — that is NOT a
+// service outage and must NOT silently degrade to offline generation.
 function isAuthError(error: Error): boolean {
   const message = error.message.toLowerCase();
   return message.includes("401") ||
+         message.includes("402") ||
+         message.includes("429") ||
          message.includes("502") ||
          message.includes("unauthorized") ||
          message.includes("api key") ||
          message.includes("user not found") ||
          message.includes("authentication") ||
          message.includes("invalid url") ||
-         message.includes("provider returned error");
+         message.includes("provider returned error") ||
+         message.includes("rate limit") ||
+         message.includes("quota") ||
+         message.includes("too many requests") ||
+         message.includes("temporarily unavailable");
 }
 
 // Get user ID from request

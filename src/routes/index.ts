@@ -31,6 +31,7 @@ import adminRouter from "./admin.js";
 import backupRouter from "./backup.js";
 import downloadRouter from "./download.js";
 import articleJobsRouter from "./articleJobs.js";
+import uploadRouter from "./upload.js";
 
 const router = Router();
 
@@ -70,5 +71,6 @@ router.use("/backup", backupRouter);
 router.use("/user", backupRouter);
 router.use("/app", downloadRouter);
 router.use(articleJobsRouter);
+router.use("/upload", uploadRouter);
 
 export default router;

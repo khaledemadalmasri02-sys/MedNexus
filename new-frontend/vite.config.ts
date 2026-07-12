@@ -21,8 +21,28 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:3001',
-        changeOrigin: false,
+        changeOrigin: true,
         ws: true,
+        // Generous timeouts: PDF extraction / summary generation can take a while.
+        // Without these, the dev proxy can drop the connection and the browser
+        // surfaces a generic "Network error during upload".
+        timeout: 0,
+        proxyTimeout: 0,
+        configure: (proxy) => {
+          proxy.on('error', (err, _req, res) => {
+            console.error('[vite-proxy] /api proxy error:', err.message);
+            if (res && typeof res.writeHead === 'function' && !res.headersSent) {
+              res.writeHead(502, { 'Content-Type': 'application/json' });
+            }
+            if (res && typeof res.end === 'function' && !res.writableEnded) {
+              res.end(JSON.stringify({ error: { code: 'PROXY_ERROR', message: 'Backend unreachable' } }));
+            }
+          });
+          proxy.on('proxyReq', (proxyReq) => {
+            // Ensure Host header matches the target backend
+            proxyReq.setHeader('Host', 'localhost:3001');
+          });
+        },
       },
     },
   },
