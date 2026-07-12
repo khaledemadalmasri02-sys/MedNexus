@@ -4,6 +4,7 @@ import helmet from "helmet";
 import compression from "compression";
 import cookieParser from "cookie-parser";
 import path from "path";
+import fs from "fs";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import router from "./routes/index.js";
@@ -166,11 +167,19 @@ app.get("/healthz", (_req: Request, res: Response) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Serve static files from frontend build in production (including Render)
-if (!isDevelopment()) {
+// Serve static files from frontend build (including Render).
+// We serve the SPA whenever the built frontend exists on disk, rather than
+// gating on NODE_ENV — this avoids the case where the production block is
+// skipped and "/" falls through to the JSON 404 (which looks like "the API").
+const frontendPath = path.join(__dirname, "../new-frontend/dist");
+const frontendExists = fs.existsSync(frontendPath);
+logger.info(
+  { frontendPath, frontendExists, isDevelopment: isDevelopment() },
+  "Frontend serving check"
+);
+if (frontendExists) {
   // On Render, the frontend is built into new-frontend/dist during build
   // We serve it from the backend so API and frontend share the same domain
-  const frontendPath = path.join(__dirname, "../new-frontend/dist");
   app.use(express.static(frontendPath, {
     maxAge: "1y",
     etag: true,
