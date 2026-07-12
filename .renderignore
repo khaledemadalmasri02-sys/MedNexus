@@ -2,9 +2,9 @@
 node_modules
 new-frontend/node_modules
 
-# Build outputs
-dist
-new-frontend/dist
+# Build outputs (MUST be deployed at runtime — do NOT ignore)
+# dist
+# new-frontend/dist
 
 # IDE
 .vscode

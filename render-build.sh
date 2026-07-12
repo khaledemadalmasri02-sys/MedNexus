@@ -2,7 +2,7 @@
 set -e
 
 echo "=== Building Backend ==="
-npm ci
+npm ci --ignore-scripts
 npm run build
 
 echo "=== Building Frontend ==="
