@@ -8,7 +8,6 @@
     "dev": "concurrently --names \"SERVER,CLIENT\" --prefix-colors \"green,blue\" \"npm run dev:server\" \"npm run dev:client\" --kill-others",
     "build": "tsc && tsc-alias",
     "build:render": "npm run build && cd new-frontend && npm ci && npm run build",
-    "postinstall": "if [ \"$RENDER\" = \"true\" ]; then npm run build:render; fi",
     "start": "NODE_ENV=production node dist/index.js",
     "start:prod": "node dist/index.js",
     "typecheck": "tsc --noEmit",
