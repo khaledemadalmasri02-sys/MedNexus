@@ -1021,37 +1021,6 @@ export const plannersApi = {
       body: JSON.stringify({ weeks }),
     }),
 
-  instances: (weeks?: number) =>
-    apiFetch<Array<{
-      id: number;
-      planId: number;
-      userId: string | null;
-      occurrenceDate: string;
-      dayOfWeek: number;
-      startHour: number;
-      durationMinutes: number;
-      title: string;
-      description: string | null;
-      color: string;
-      deckId: number | null;
-      createdAt: string;
-    }>>(`${PLANNERS_BASE}/instances${weeks ? `?weeks=${weeks}` : ""}`),
-
-  overlaps: () =>
-    apiFetch<{ overlaps: Array<{ aId: number; bId: number; dayOfWeek: number; aTitle: string; bTitle: string }>; conflictedIds: number[] }>(`${PLANNERS_BASE}/overlaps`),
-
-  reminders: () =>
-    apiFetch<Array<{
-      id: number;
-      title: string;
-      dayOfWeek: number;
-      startHour: number;
-      durationMinutes: number;
-      color: string;
-      at: string;
-      leadMinutes: number;
-    }>>(`${PLANNERS_BASE}/reminders`),
-
   streakHistory: (days?: number) =>
     apiFetch<{ days: Array<{ date: string; plannedMinutes: number; actualMinutes: number; sessionsCompleted: number; hasActivity: boolean }> }>(`${PLANNERS_BASE}/streak-history${days ? `?days=${days}` : ""}`),
 
@@ -1111,6 +1080,11 @@ export const studySessionsApi = {
     }),
 
   stats: () => apiFetch<StudySessionStats>(`${STUDY_SESSIONS_BASE}/stats`),
+
+  focusAverage: (days?: number) =>
+    apiFetch<{ average: number | null; count: number; days: number }>(
+      `${STUDY_SESSIONS_BASE}/focus-average${days ? `?days=${days}` : ""}`
+    ),
 
   history: (limit?: number, offset?: number) =>
     apiFetch<{ sessions: StudySession[]; pagination: { total: number; limit: number; offset: number; hasMore: boolean } }>(

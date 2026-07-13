@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { GraduationCap, Plus, Trash2, Clock } from "lucide-react";
+import { GraduationCap, Plus, Trash2, Clock, Pencil } from "lucide-react";
 import { examsApi } from "../../lib/api";
 import type { StudyExam } from "../../lib/api";
 import { GlowingInput, Modal } from "../../components/ui";
@@ -20,8 +20,16 @@ function diffParts(examDate: string) {
   return { days, passed: target <= now };
 }
 
+/** Convert an ISO string to the value format expected by <input type="datetime-local"> in local time. */
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function ExamsPanel({ exams, onChanged }: ExamsPanelProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [title, setTitle] = useState("");
   const [subject, setSubject] = useState("");
   const [examDate, setExamDate] = useState("");
@@ -30,12 +38,32 @@ export default function ExamsPanel({ exams, onChanged }: ExamsPanelProps) {
 
   const sorted = [...exams].sort((a, b) => new Date(a.examDate).getTime() - new Date(b.examDate).getTime());
 
-  const handleCreate = async () => {
+  const openCreate = () => {
+    setEditingId(null);
+    setTitle(""); setSubject(""); setExamDate(""); setColor(COLORS[0]);
+    setIsOpen(true);
+  };
+
+  const openEdit = (exam: StudyExam) => {
+    setEditingId(exam.id);
+    setTitle(exam.title);
+    setSubject(exam.subject || "");
+    setExamDate(toLocalInput(exam.examDate));
+    setColor(exam.color);
+    setIsOpen(true);
+  };
+
+  const handleSave = async () => {
     if (!title || !examDate) return;
     setSaving(true);
     try {
-      await examsApi.create({ title, subject: subject || undefined, examDate: new Date(examDate).toISOString(), color });
-      setTitle(""); setSubject(""); setExamDate(""); setIsOpen(false);
+      const payload = { title, subject: subject || undefined, examDate: new Date(examDate).toISOString(), color };
+      if (editingId != null) {
+        await examsApi.update(editingId, payload);
+      } else {
+        await examsApi.create(payload);
+      }
+      setTitle(""); setSubject(""); setExamDate(""); setEditingId(null); setIsOpen(false);
       onChanged();
     } catch { /* ignore */ }
     setSaving(false);
@@ -54,7 +82,7 @@ export default function ExamsPanel({ exams, onChanged }: ExamsPanelProps) {
         </div>
         <motion.button
           whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-          onClick={() => setIsOpen(true)}
+          onClick={openCreate}
           className="px-3 py-2 rounded-xl text-white text-sm font-semibold flex items-center gap-2"
           style={{ background: "linear-gradient(135deg, var(--accent-purple), var(--accent-violet))" }}
         >
@@ -85,9 +113,14 @@ export default function ExamsPanel({ exams, onChanged }: ExamsPanelProps) {
                     <p className="font-semibold text-text-primary truncate">{exam.title}</p>
                     <p className="text-xs text-text-muted">{exam.subject || "Goal"}</p>
                   </div>
-                  <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => handleDelete(exam.id)} className="p-1.5 rounded-lg" style={{ background: "rgba(239,68,68,.1)" }}>
-                    <Trash2 className="h-3.5 w-3.5 text-red-400" />
-                  </motion.button>
+                  <div className="flex items-center gap-1.5">
+                    <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => openEdit(exam)} className="p-1.5 rounded-lg" style={{ background: "rgba(139,92,246,.1)" }}>
+                      <Pencil className="h-3.5 w-3.5 text-accent-purple" />
+                    </motion.button>
+                    <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => handleDelete(exam.id)} className="p-1.5 rounded-lg" style={{ background: "rgba(239,68,68,.1)" }}>
+                      <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                    </motion.button>
+                  </div>
                 </div>
                 <div className="mt-3 flex items-center justify-between">
                   <div className="flex items-center gap-1 text-text-secondary text-sm">
@@ -105,7 +138,7 @@ export default function ExamsPanel({ exams, onChanged }: ExamsPanelProps) {
         </div>
       )}
 
-      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title="Add Exam / Goal">
+      <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title={editingId != null ? "Edit Exam / Goal" : "Add Exam / Goal"}>
         <div className="space-y-4">
           <GlowingInput label="Title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Cardiology Final" />
           <GlowingInput label="Subject (optional)" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Cardiology" />
@@ -128,11 +161,11 @@ export default function ExamsPanel({ exams, onChanged }: ExamsPanelProps) {
           </div>
           <motion.button
             whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-            onClick={handleCreate} disabled={saving}
+            onClick={handleSave} disabled={saving}
             className="w-full py-3 rounded-xl text-white font-semibold"
             style={{ background: "linear-gradient(135deg, var(--accent-purple), var(--accent-violet))" }}
           >
-            {saving ? "Saving…" : "Add Exam"}
+            {saving ? "Saving…" : editingId != null ? "Save Changes" : "Add Exam"}
           </motion.button>
         </div>
       </Modal>

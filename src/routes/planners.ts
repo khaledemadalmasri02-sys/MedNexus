@@ -11,6 +11,8 @@ import {
   createReminderNotification,
   computeStreakHistory,
   buildWeekIcs,
+  nextOccurrence,
+  toPlannerDow,
 } from "../lib/planner.js";
 
 const router = Router();
@@ -74,7 +76,7 @@ router.get("/today", async (req: Request, res: Response) => {
   try {
     const userId = getUserId(req);
     const todayIdx = new Date().getDay();
-    const adjustedTodayIdx = todayIdx === 0 ? 6 : todayIdx - 1;
+    const adjustedTodayIdx = toPlannerDow(todayIdx);
 
     const plans = await db.query.studyPlans.findMany({
       where: and(planOwnerFilter(userId), eq(studyPlans.dayOfWeek, adjustedTodayIdx)),
@@ -195,14 +197,9 @@ router.get("/reminders", async (req: Request, res: Response) => {
     const now = new Date();
     const reminders = plans
       .map((p) => {
-        const now = new Date();
-        const jsToday = now.getDay();
-        const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
-        const diff = (p.dayOfWeek - adjustedToday + 7) % 7;
-        const dt = new Date(now);
-        dt.setDate(now.getDate() + diff);
-        dt.setHours(p.startHour, 0, 0, 0);
-        return { plan: p, at: dt };
+        const { datetime } = nextOccurrence(p.dayOfWeek);
+        datetime.setHours(p.startHour, 0, 0, 0);
+        return { plan: p, at: datetime };
       })
       .filter(({ at }) => at.getTime() >= now.getTime() && at.getTime() <= now.getTime() + 24 * 60 * 60 * 1000)
       .sort((a, b) => a.at.getTime() - b.at.getTime())
@@ -242,8 +239,7 @@ router.get("/export/ics", async (req: Request, res: Response) => {
     const userId = getUserId(req);
     const plans = await db.query.studyPlans.findMany({ where: planOwnerFilter(userId) });
     const now = new Date();
-    const jsToday = now.getDay();
-    const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
+    const adjustedToday = toPlannerDow(now.getDay());
     const weekStart = new Date(now);
     weekStart.setDate(now.getDate() - adjustedToday);
     weekStart.setHours(0, 0, 0, 0);
@@ -462,7 +458,7 @@ router.get("/streak", async (req: Request, res: Response) => {
       const checkDate = new Date(today);
       checkDate.setDate(checkDate.getDate() - i);
       const dow = checkDate.getDay();
-      const adjustedDow = dow === 0 ? 6 : dow - 1;
+      const adjustedDow = toPlannerDow(dow);
 
       const dayPlans = plans.filter(p => p.dayOfWeek === adjustedDow);
       if (dayPlans.length === 0) continue;

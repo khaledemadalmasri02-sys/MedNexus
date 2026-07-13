@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { db, notifications } from "../db/index.js";
-import { eq, and, isNull, sql } from "drizzle-orm";
+import { eq, and, isNull, or, lte, sql } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import { validateBody } from "../middleware/validate.js";
 import { createNotificationSchema } from "./validators.js";
@@ -18,6 +18,8 @@ router.get("/", async (req: Request, res: Response) => {
     const unreadOnly = req.query.unread === 'true';
 
     const conditions = [userId ? eq(notifications.userId, userId) : isNull(notifications.userId)];
+    // Scheduled reminders are hidden until their delivery time arrives.
+    conditions.push(or(isNull(notifications.scheduledAt), lte(notifications.scheduledAt, new Date()))!);
     if (unreadOnly) {
       conditions.push(eq(notifications.read, false));
     }
@@ -30,6 +32,7 @@ router.get("/", async (req: Request, res: Response) => {
     const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(notifications).where(
       and(
         userId ? eq(notifications.userId, userId) : isNull(notifications.userId),
+        or(isNull(notifications.scheduledAt), lte(notifications.scheduledAt, new Date()))!,
         eq(notifications.read, false),
       ),
     );

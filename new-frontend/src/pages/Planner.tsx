@@ -36,6 +36,8 @@ import EmptyState from "../components/planner/EmptyState";
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 7);
+/** JS getDay() (0=Sun..6=Sat) → planner weekday (0=Mon..6=Sun). */
+const toPlannerDow = (jsDay: number) => (jsDay === 0 ? 6 : jsDay - 1);
 const ALL_HOURS = Array.from({ length: 24 }, (_, i) => i);
 const COLORS = [
   'var(--accent-green)',
@@ -1034,7 +1036,7 @@ export default function Planner() {
   }, [showAddModal, showAIModal, selectedSession, setHidden]);
 
   const todayIdx = new Date().getDay();
-  const adjustedTodayIdx = todayIdx === 0 ? 6 : todayIdx - 1;
+  const adjustedTodayIdx = toPlannerDow(todayIdx);
 
   const fetchPlans = useCallback(async () => {
     setLoading(true);
@@ -1086,14 +1088,8 @@ export default function Planner() {
 
   const fetchFocusAvg = useCallback(async () => {
     try {
-      const res = await studySessionsApi.history(300);
-      const rated = res.sessions.filter((s) => s.focusRating != null && s.focusRating > 0);
-      if (rated.length === 0) {
-        setFocusAvg(null);
-        return;
-      }
-      const avg = rated.reduce((a, s) => a + (s.focusRating || 0), 0) / rated.length;
-      setFocusAvg(avg);
+      const res = await studySessionsApi.focusAverage(120);
+      setFocusAvg(res.average);
     } catch {
       setFocusAvg(null);
     }
@@ -1136,7 +1132,7 @@ export default function Planner() {
   const weekDates = useMemo(() => {
     const now = new Date();
     const jsToday = now.getDay();
-    const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
+    const adjustedToday = toPlannerDow(jsToday);
     const monday = new Date(now);
     monday.setDate(now.getDate() - adjustedToday + weekOffset * 7);
     return Array.from({ length: 7 }, (_, i) => {
@@ -1164,7 +1160,10 @@ export default function Planner() {
   }, [weekSchedule]);
 
   const conflictCount = useMemo(() => weekSchedule.filter((p) => p.hasConflict).length, [weekSchedule]);
-  const filteredSchedule = subjectFilter ? weekSchedule.filter((p) => p.color === subjectFilter) : weekSchedule;
+  const filteredSchedule = useMemo(
+    () => (subjectFilter ? weekSchedule.filter((p) => p.color === subjectFilter) : weekSchedule),
+    [weekSchedule, subjectFilter],
+  );
   const ROW_H = 56;
 
   const nextSession = useMemo(() => {
@@ -1271,10 +1270,11 @@ export default function Planner() {
   }, []);
 
   const handleExportPdf = useCallback(() => {
+    const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
     const rows = weekSchedule
       .slice()
       .sort((a, b) => a.dayOfWeek - b.dayOfWeek || a.startHour - b.startHour)
-      .map((p) => `<tr><td style="padding:6px 10px;border:1px solid #ccc">${DAYS[p.dayOfWeek]}</td><td style="padding:6px 10px;border:1px solid #ccc">${p.startHour}:00</td><td style="padding:6px 10px;border:1px solid #ccc">${p.durationMinutes}m</td><td style="padding:6px 10px;border:1px solid #ccc">${p.title}</td></tr>`)
+      .map((p) => `<tr><td style="padding:6px 10px;border:1px solid #ccc">${escapeHtml(DAYS[p.dayOfWeek] ?? '')}</td><td style="padding:6px 10px;border:1px solid #ccc">${p.startHour}:00</td><td style="padding:6px 10px;border:1px solid #ccc">${p.durationMinutes}m</td><td style="padding:6px 10px;border:1px solid #ccc">${escapeHtml(p.title)}</td></tr>`)
       .join('');
     const html = `<!doctype html><html><head><title>MedNexus Study Week</title></head><body style="font-family:sans-serif"><h1>MedNexus Study Week</h1><table style="border-collapse:collapse;width:100%"><thead><tr><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Day</th><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Start</th><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Duration</th><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Session</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
     const w = window.open('', '_blank');

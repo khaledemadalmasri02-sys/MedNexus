@@ -192,6 +192,36 @@ router.get("/history", async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/study-sessions/focus-average?days=120 — avg focus rating ──
+router.get("/focus-average", async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const days = Math.min(parseInt(req.query.days as string) || 120, 365);
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - (days - 1));
+
+    const [result] = await db
+      .select({
+        avg: sql<number | null>`avg(${studySessions.focusRating})`,
+        count: sql<number>`count(${studySessions.focusRating})`,
+      })
+      .from(studySessions)
+      .where(
+        and(
+          userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId),
+          gte(studySessions.startedAt, start),
+          sql`${studySessions.focusRating} IS NOT NULL`,
+        ),
+      );
+
+    res.json({ average: result?.avg ?? null, count: result?.count ?? 0, days });
+  } catch (err) {
+    logger.error({ err }, "Failed to get focus average");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get focus average" } });
+  }
+});
+
 // ── GET /api/study-sessions/recent — recent sessions with deck names ──
 router.get("/recent", async (req: Request, res: Response) => {
   try {

@@ -4,20 +4,25 @@ import type { StudyPlan } from "../db/schema.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** ISO date (yyyy-mm-dd) for the next occurrence of a plan's weekday at startHour. */
-function nextOccurrence(dayOfWeek: number, weeksAhead = 0): { date: string; datetime: Date } {
+/** Convert a JS getDay() value (0=Sun..6=Sat) to planner weekday (0=Mon..6=Sun). */
+export function toPlannerDow(jsDay: number): number {
+  return jsDay === 0 ? 6 : jsDay - 1;
+}
+
+/** Local calendar date as yyyy-mm-dd (avoids UTC drift from toISOString in +offset zones). */
+export function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Next occurrence (local date + datetime at midnight) of a plan's weekday. */
+export function nextOccurrence(dayOfWeek: number, weeksAhead = 0): { date: string; datetime: Date } {
   const now = new Date();
-  // JS getDay(): 0=Sun..6=Sat. Planner uses 0=Mon..6=Sun.
-  const jsToday = now.getDay();
-  const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
-  let diff = (dayOfWeek - adjustedToday + 7) % 7;
-  if (diff === 0) diff = 0; // today
-  const date = new Date(now);
-  date.setDate(now.getDate() + diff + weeksAhead * 7);
-  date.setHours(0, 0, 0, 0);
-  const datetime = new Date(date);
+  const adjustedToday = toPlannerDow(now.getDay());
+  const diff = (dayOfWeek - adjustedToday + 7) % 7;
+  const datetime = new Date(now);
+  datetime.setDate(now.getDate() + diff + weeksAhead * 7);
   datetime.setHours(0, 0, 0, 0);
-  return { date: datetime.toISOString().split("T")[0], datetime };
+  return { date: localDateKey(datetime), datetime };
 }
 
 export interface PlanOverlap {
@@ -106,12 +111,11 @@ export async function expandRecurringPlan(plan: StudyPlan, weeks = 4): Promise<n
       const dt = new Date();
       dt.setDate(dt.getDate() + d);
       dt.setHours(plan.startHour, 0, 0, 0);
-      const jsDay = dt.getDay();
-      const adjusted = jsDay === 0 ? 6 : jsDay - 1;
+      const adjusted = toPlannerDow(dt.getDay());
       rows.push({
         planId: plan.id,
         userId: plan.userId,
-        occurrenceDate: dt.toISOString().split("T")[0],
+        occurrenceDate: localDateKey(dt),
         dayOfWeek: adjusted,
         startHour: plan.startHour,
         durationMinutes: plan.durationMinutes,
@@ -143,21 +147,25 @@ export async function createReminderNotification(
       userId: plan.userId,
       type: "study_reminder",
       title: "Study session soon",
-      message: `"${plan.title}" starts at ${String(plan.startHour).padStart(2, "0")}:00 — ${leadMinutes} min reminder set.`,
+      message: `"${plan.title}" starts at ${String(plan.startHour).padStart(2, "0")}:00 — ${leadMinutes} min reminder.`,
       actionUrl: "/planner",
-      createdAt: new Date(),
+      scheduledAt: reminderAt,
+      createdAt: reminderAt,
     });
   } else {
-    // recurring: schedule a single heads-up for the next occurrence
+    // recurring: schedule a heads-up for the next occurrence at lead time
     const { datetime } = nextOccurrence(plan.dayOfWeek);
     datetime.setHours(plan.startHour, 0, 0, 0);
+    const reminderAt = new Date(datetime.getTime() - leadMinutes * 60 * 1000);
+    if (reminderAt.getTime() < Date.now()) return; // next occurrence already within lead window
     await db.insert(notifications).values({
       userId: plan.userId,
       type: "study_reminder",
       title: "Recurring session reminder",
-      message: `"${plan.title}" (${plan.recurrence}) — we'll nudge you ${leadMinutes} min before each session.`,
+      message: `"${plan.title}" (${plan.recurrence}) starts at ${String(plan.startHour).padStart(2, "0")}:00 — ${leadMinutes} min reminder.`,
       actionUrl: "/planner",
-      createdAt: new Date(),
+      scheduledAt: reminderAt,
+      createdAt: reminderAt,
     });
   }
 }
@@ -186,7 +194,15 @@ export async function computeStreakHistory(
   });
   const plannedByDow = new Map<number, number>();
   for (const p of plans) {
-    plannedByDow.set(p.dayOfWeek, (plannedByDow.get(p.dayOfWeek) || 0) + p.durationMinutes);
+    if (p.recurrence === "daily") {
+      // occurs every day → count toward all 7 weekdays
+      for (let dow = 0; dow < 7; dow++) {
+        plannedByDow.set(dow, (plannedByDow.get(dow) || 0) + p.durationMinutes);
+      }
+    } else if (p.recurrence === "weekly") {
+      plannedByDow.set(p.dayOfWeek, (plannedByDow.get(p.dayOfWeek) || 0) + p.durationMinutes);
+    }
+    // one-time ("none") plans have no recurring weekday baseline → skip
   }
 
   // Actual session minutes per date
@@ -199,7 +215,7 @@ export async function computeStreakHistory(
   });
   const actualByDate = new Map<string, { minutes: number; count: number }>();
   for (const s of sessions) {
-    const key = new Date(s.startedAt).toISOString().split("T")[0];
+    const key = localDateKey(new Date(s.startedAt));
     const cur = actualByDate.get(key) || { minutes: 0, count: 0 };
     cur.minutes += s.durationMinutes || 0;
     cur.count += 1;
@@ -209,9 +225,8 @@ export async function computeStreakHistory(
   const result: StreakHistoryDay[] = [];
   for (let i = 0; i < days; i++) {
     const d = new Date(start.getTime() + i * DAY_MS);
-    const key = d.toISOString().split("T")[0];
-    const jsDay = d.getDay();
-    const dow = jsDay === 0 ? 6 : jsDay - 1;
+    const key = localDateKey(d);
+    const dow = toPlannerDow(d.getDay());
     const actual = actualByDate.get(key);
     result.push({
       date: key,
@@ -246,13 +261,18 @@ export function buildWeekIcs(
     dt.setDate(weekStart.getDate() + p.dayOfWeek);
     dt.setHours(p.startHour, 0, 0, 0);
     const end = new Date(dt.getTime() + p.durationMinutes * 60 * 1000);
-    const fmt = (d: Date) => d.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+    // Floating local time (no Z) so the event shows at the user's wall-clock time.
+    const fmtLocal = (d: Date) =>
+      `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}T` +
+      `${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
+    // DTSTAMP is a genuine UTC timestamp.
+    const fmtUtc = (d: Date) => d.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
     lines.push(
       "BEGIN:VEVENT",
       `UID:${dt.getTime()}-${icsEscape(p.title)}@mednexus`,
-      `DTSTAMP:${fmt(new Date())}`,
-      `DTSTART:${fmt(dt)}`,
-      `DTEND:${fmt(end)}`,
+      `DTSTAMP:${fmtUtc(new Date())}`,
+      `DTSTART:${fmtLocal(dt)}`,
+      `DTEND:${fmtLocal(end)}`,
       `SUMMARY:${icsEscape(p.title)}`,
       p.description ? `DESCRIPTION:${icsEscape(p.description)}` : "",
       "END:VEVENT",

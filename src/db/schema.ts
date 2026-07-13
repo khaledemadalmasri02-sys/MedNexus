@@ -310,6 +310,7 @@ export const notifications = sqliteTable("notifications", {
   message: text("message").notNull(),
   read: integer("read", { mode: "boolean" }).notNull().default(false),
   actionUrl: text("action_url"),
+  scheduledAt: integer("scheduled_at", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 

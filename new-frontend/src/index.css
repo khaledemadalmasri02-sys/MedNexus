@@ -95,9 +95,14 @@ body {
   50% { transform: translate(-50px, 30px); }
   100% { transform: translate(0, 0); }
 }
-.planner-orb-1 { animation: plannerDrift1 18s ease-in-out infinite !important; }
-.planner-orb-2 { animation: plannerDrift2 22s ease-in-out infinite !important; }
-.planner-orb-3 { animation: plannerDrift1 26s ease-in-out infinite reverse !important; }
+.planner-orb-1 { animation: plannerDrift1 18s ease-in-out infinite !important; will-change: transform; }
+.planner-orb-2 { animation: plannerDrift2 22s ease-in-out infinite !important; will-change: transform; }
+.planner-orb-3 { animation: plannerDrift1 26s ease-in-out infinite reverse !important; will-change: transform; }
+
+/* Honor reduced-motion: stop the continuous drift (and the backdrop repaint it forces). */
+@media (prefers-reduced-motion: reduce) {
+  .planner-orb-1, .planner-orb-2, .planner-orb-3 { animation: none !important; }
+}
 
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
