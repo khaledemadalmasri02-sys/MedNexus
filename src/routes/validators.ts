@@ -160,6 +160,25 @@ export const endStudySessionSchema = z.object({
   cardsStudied: z.number().int().min(0).optional(),
   knownCount: z.number().int().min(0).optional(),
   unknownCount: z.number().int().min(0).optional(),
+  focusRating: z.number().int().min(1).max(5).optional(),
+});
+
+export const createExamSchema = z.object({
+  title: z.string().min(1).max(200),
+  subject: z.string().max(200).optional(),
+  examDate: z.string().datetime(),
+  color: z.string().max(20).optional(),
+});
+
+export const updateExamSchema = z.object({
+  title: z.string().min(1).max(200).optional(),
+  subject: z.string().max(200).optional(),
+  examDate: z.string().datetime().optional(),
+  color: z.string().max(20).optional(),
+});
+
+export const expandPlannerSchema = z.object({
+  weeks: z.number().int().min(1).max(12).optional(),
 });
 
 export const createPlannerSchema = z.object({

@@ -244,6 +244,7 @@ export const studySessions = sqliteTable("study_sessions", {
   cardsStudied: integer("cards_studied").notNull().default(0),
   knownCount: integer("known_count"),
   unknownCount: integer("unknown_count"),
+  focusRating: integer("focus_rating"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -252,6 +253,39 @@ export type StudyPlan = typeof studyPlans.$inferSelect;
 export type NewStudyPlan = typeof studyPlans.$inferInsert;
 export type StudySession = typeof studySessions.$inferSelect;
 export type NewStudySession = typeof studySessions.$inferInsert;
+
+// Study Exams table — goals with a target date + live countdown
+export const studyExams = sqliteTable("study_exams", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").references(() => users.id),
+  title: text("title").notNull(),
+  subject: text("subject"),
+  examDate: integer("exam_date", { mode: "timestamp" }).notNull(),
+  color: text("color").notNull().default("#06b6d4"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// Study Plan Instances table — materialized dated occurrences of recurring plans
+export const studyPlanInstances = sqliteTable("study_plan_instances", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  planId: integer("plan_id").notNull().references(() => studyPlans.id, { onDelete: "cascade" }),
+  userId: text("user_id").references(() => users.id),
+  occurrenceDate: text("occurrence_date").notNull(),
+  dayOfWeek: integer("day_of_week").notNull(),
+  startHour: integer("start_hour").notNull(),
+  durationMinutes: integer("duration_minutes").notNull().default(60),
+  title: text("title").notNull(),
+  description: text("description"),
+  color: text("color").notNull().default("#06b6d4"),
+  deckId: integer("deck_id").references(() => decks.id),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type StudyExam = typeof studyExams.$inferSelect;
+export type NewStudyExam = typeof studyExams.$inferInsert;
+export type StudyPlanInstance = typeof studyPlanInstances.$inferSelect;
+export type NewStudyPlanInstance = typeof studyPlanInstances.$inferInsert;
 
 // Study Plan Templates table
 export const studyPlanTemplates = sqliteTable("study_plan_templates", {

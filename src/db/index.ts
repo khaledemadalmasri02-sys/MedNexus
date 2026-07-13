@@ -33,6 +33,7 @@ export const {
   mindMaps, topics, feedback, generationLogs, freeTierUsage,
   agentSessions, terminalSessions, auditLogs, errorLogs,
   studyPlans, studySessions, studyPlanTemplates, notifications,
+  studyExams, studyPlanInstances,
   cardProgress, tags, deckTags, qbankTags,
   achievements, userSettings, milestoneAcknowledgments,
   emailVerificationTokens, passwordResetTokens,

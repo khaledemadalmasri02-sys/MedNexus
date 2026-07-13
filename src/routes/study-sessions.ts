@@ -88,7 +88,7 @@ router.post("/:id/end", validateBody(endStudySessionSchema), async (req: Request
     const durationMs = endedAt.getTime() - new Date(existing.startedAt).getTime();
     const durationMinutes = Math.max(1, Math.round(durationMs / 60000));
 
-    const { cardsStudied, knownCount, unknownCount } = req.body;
+    const { cardsStudied, knownCount, unknownCount, focusRating } = req.body;
 
     const [updated] = await db.update(studySessions).set({
       endedAt,
@@ -96,6 +96,7 @@ router.post("/:id/end", validateBody(endStudySessionSchema), async (req: Request
       cardsStudied: cardsStudied !== undefined ? cardsStudied : existing.cardsStudied,
       knownCount: knownCount !== undefined ? knownCount : existing.knownCount,
       unknownCount: unknownCount !== undefined ? unknownCount : existing.unknownCount,
+      focusRating: focusRating !== undefined ? focusRating : existing.focusRating,
     }).where(eq(studySessions.id, sessionId)).returning();
 
     res.json(updated);

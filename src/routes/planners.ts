@@ -1,9 +1,17 @@
 import { Router, Request, Response } from "express";
-import { db, studyPlans, studySessions, decks } from "../db/index.js";
-import { eq, and, isNull, inArray } from "drizzle-orm";
+import { db, studyPlans, studySessions, decks, studyPlanInstances } from "../db/index.js";
+import { eq, and, isNull, inArray, desc } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import { validateBody } from "../middleware/validate.js";
-import { createPlannerSchema, updatePlannerSchema } from "./validators.js";
+import { createPlannerSchema, updatePlannerSchema, expandPlannerSchema } from "./validators.js";
+import {
+  detectOverlaps,
+  conflictedIds,
+  expandRecurringPlan,
+  createReminderNotification,
+  computeStreakHistory,
+  buildWeekIcs,
+} from "../lib/planner.js";
 
 const router = Router();
 
@@ -121,14 +129,19 @@ router.get("/week", async (req: Request, res: Response) => {
       };
     }
 
+    const overlaps = detectOverlaps(plans);
+    const conflicted = conflictedIds(overlaps);
+
     const result = plans.map(p => ({
       ...p,
       deckName: p.deckId ? deckMap.get(p.deckId) || null : null,
       duration: p.durationMinutes,
+      hasConflict: conflicted.has(p.id),
     }));
 
     res.json({
       plans: result,
+      conflicts: overlaps,
       stats: {
         totalSessions,
         completedSessions,
@@ -140,6 +153,107 @@ router.get("/week", async (req: Request, res: Response) => {
   } catch (err) {
     logger.error({ err }, "Failed to get week planners");
     res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get week planners" } });
+  }
+});
+
+// ── GET /api/planners/overlaps — detect overlapping sessions (same day/time) ──
+router.get("/overlaps", async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const plans = await db.query.studyPlans.findMany({ where: planOwnerFilter(userId) });
+    const overlaps = detectOverlaps(plans);
+    res.json({ overlaps, conflictedIds: [...conflictedIds(overlaps)] });
+  } catch (err) {
+    logger.error({ err }, "Failed to detect overlaps");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to detect overlaps" } });
+  }
+});
+
+// ── GET /api/planners/instances?weeks=N — materialized recurring instances ──
+router.get("/instances", async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const weeks = Math.min(parseInt(req.query.weeks as string) || 4, 12);
+    const userIdFilter = userId ? eq(studyPlanInstances.userId, userId) : isNull(studyPlanInstances.userId);
+    const instances = await db.query.studyPlanInstances.findMany({
+      where: userIdFilter,
+      orderBy: desc(studyPlanInstances.occurrenceDate),
+      limit: weeks * 7 * 4,
+    });
+    res.json(instances);
+  } catch (err) {
+    logger.error({ err }, "Failed to list plan instances");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list plan instances" } });
+  }
+});
+
+// ── GET /api/planners/reminders — upcoming session reminders (next 24h) ──
+router.get("/reminders", async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const plans = await db.query.studyPlans.findMany({ where: planOwnerFilter(userId) });
+    const now = new Date();
+    const reminders = plans
+      .map((p) => {
+        const now = new Date();
+        const jsToday = now.getDay();
+        const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
+        const diff = (p.dayOfWeek - adjustedToday + 7) % 7;
+        const dt = new Date(now);
+        dt.setDate(now.getDate() + diff);
+        dt.setHours(p.startHour, 0, 0, 0);
+        return { plan: p, at: dt };
+      })
+      .filter(({ at }) => at.getTime() >= now.getTime() && at.getTime() <= now.getTime() + 24 * 60 * 60 * 1000)
+      .sort((a, b) => a.at.getTime() - b.at.getTime())
+      .map(({ plan, at }) => ({
+        id: plan.id,
+        title: plan.title,
+        dayOfWeek: plan.dayOfWeek,
+        startHour: plan.startHour,
+        durationMinutes: plan.durationMinutes,
+        color: plan.color,
+        at: at.toISOString(),
+        leadMinutes: 15,
+      }));
+    res.json(reminders);
+  } catch (err) {
+    logger.error({ err }, "Failed to list reminders");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list reminders" } });
+  }
+});
+
+// ── GET /api/planners/streak-history?days=120 — per-day completion ──
+router.get("/streak-history", async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const days = Math.min(parseInt(req.query.days as string) || 120, 365);
+    const history = await computeStreakHistory(userId, days);
+    res.json({ days: history });
+  } catch (err) {
+    logger.error({ err }, "Failed to get streak history");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get streak history" } });
+  }
+});
+
+// ── GET /api/planners/export/ics — download current week as .ics ──
+router.get("/export/ics", async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const plans = await db.query.studyPlans.findMany({ where: planOwnerFilter(userId) });
+    const now = new Date();
+    const jsToday = now.getDay();
+    const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - adjustedToday);
+    weekStart.setHours(0, 0, 0, 0);
+    const ics = buildWeekIcs(plans, weekStart);
+    res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="mednexus-week.ics"');
+    res.send(ics);
+  } catch (err) {
+    logger.error({ err }, "Failed to export ics");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to export ics" } });
   }
 });
 
@@ -168,6 +282,13 @@ router.post("/", validateBody(createPlannerSchema), async (req: Request, res: Re
       createdAt: new Date(),
       updatedAt: new Date(),
     }).returning();
+
+    try {
+      if (plan.recurrence && plan.recurrence !== "none") await expandRecurringPlan(plan);
+      await createReminderNotification(plan);
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to expand/notify plan (non-fatal)");
+    }
 
     res.status(201).json({ ...plan, duration: plan.durationMinutes });
   } catch (err) {
@@ -206,6 +327,13 @@ router.patch("/:id", validateBody(updatePlannerSchema), async (req: Request, res
       updatedAt: new Date(),
     }).where(and(eq(studyPlans.id, planId), planOwnerFilter(userId))).returning();
 
+    try {
+      if (updated.recurrence && updated.recurrence !== "none") await expandRecurringPlan(updated);
+      await createReminderNotification(updated);
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to expand/notify plan (non-fatal)");
+    }
+
     res.json({ ...updated, duration: updated.durationMinutes });
   } catch (err) {
     logger.error({ err }, "Failed to update planner");
@@ -234,6 +362,29 @@ router.delete("/:id", async (req: Request, res: Response) => {
   } catch (err) {
     logger.error({ err }, "Failed to delete planner");
     res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete planner" } });
+  }
+});
+
+// ── POST /api/planners/:id/expand — materialize recurring instances ──
+router.post("/:id/expand", validateBody(expandPlannerSchema), async (req: Request, res: Response) => {
+  try {
+    const userId = getUserId(req);
+    const planId = parseInt(req.params.id, 10);
+    if (isNaN(planId)) {
+      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
+      return;
+    }
+    const existing = await getPlanById(planId, userId);
+    if (!existing) {
+      res.status(404).json({ error: { code: "NOT_FOUND", message: "Plan not found" } });
+      return;
+    }
+    const weeks = req.body.weeks || 4;
+    const count = await expandRecurringPlan(existing, weeks);
+    res.json({ planId, weeks, created: count });
+  } catch (err) {
+    logger.error({ err }, "Failed to expand plan");
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to expand plan" } });
   }
 });
 
