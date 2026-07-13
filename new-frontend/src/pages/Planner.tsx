@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, type CSSProperties } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarDays, ChevronLeft, ChevronRight, Plus, Clock,
@@ -6,7 +6,9 @@ import {
   Flame, Target, Trophy, Sparkles, Timer, CalendarCheck,
   ChevronDown, Layers, Stethoscope, FileOutput, Link2,
   RefreshCw, Loader2, AlertCircle, Play, Pause, Square,
-  GripVertical,
+  GripVertical, GitBranch,
+  Download, Printer, Focus, AlertTriangle,
+  ArrowRight,
 } from 'lucide-react';
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent,
@@ -16,14 +18,21 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatedTabs, Modal, GlowingInput } from "../components/ui";
-import { smoothTransition, staggerContainer } from "../components/ui/constants";
+import { smoothTransition, staggerContainer, listItem } from "../components/ui/constants";
 import { useNavbarVisibility } from "../components/Navbar";
-import { plannersApi, studySessionsApi, decksApi, qbanksApi, summaryApi, plannerTemplatesApi } from "../lib/api";
-import type { PlannerPlan, StudySessionStats } from "../lib/api";
+import { plannersApi, studySessionsApi, decksApi, qbanksApi, summaryApi, plannerTemplatesApi, examsApi } from "../lib/api";
+import type { PlannerPlan, StudySessionStats, StudyExam } from "../lib/api";
 import type { Deck, QBank } from "../lib/api";
 import AnalyticsView from "../components/planner/AnalyticsView";
 import AIGeneratePlanModal from "../components/planner/AIGeneratePlanModal";
 import type { PlannerTemplate } from "../lib/api";
+import ExamCountdown from "../components/planner/ExamCountdown";
+import ExamsPanel from "../components/planner/ExamsPanel";
+import FocusNowModal from "../components/planner/FocusNowModal";
+import StreakHeatmap from "../components/planner/StreakHeatmap";
+import SubjectLegend from "../components/planner/SubjectLegend";
+import PlannerSidebar, { type PlannerView } from "../components/planner/PlannerSidebar";
+import EmptyState from "../components/planner/EmptyState";
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 7);
@@ -51,12 +60,14 @@ const glassStyle = {
   background: "var(--glass-card-bg)",
   border: "1px solid var(--glass-border)",
   backdropFilter: "blur(20px)",
-} as const;
+};
 
-const itemVariant = {
-  hidden: { opacity: 0, y: 20 },
-  visible: { opacity: 1, y: 0, transition: smoothTransition },
-  exit: { opacity: 0, x: -30, transition: { duration: 0.2 } },
+// Thick layered glass for the grid container (refracts the orbs)
+const glassThick = {
+  background: "var(--glass-card-bg)",
+  border: "1px solid var(--glass-border)",
+  backdropFilter: "blur(20px)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,.10), 0 24px 70px rgba(0,0,0,.40)",
 };
 
 const CONFETTI_COLORS = ['var(--accent-green)', 'var(--accent-purple)', 'var(--accent-amber)', 'var(--accent-emerald)', 'var(--accent-violet)', 'var(--accent-blue)'];
@@ -597,11 +608,12 @@ function AddSessionModal({ isOpen, onClose, onAdd, editPlan }: {
   );
 }
 
-function SessionCard({ plan, onToggle, onDelete, onSelect }: {
+function SessionCard({ plan, onToggle, onDelete, onSelect, conflict = false }: {
   plan: PlannerPlan;
   onToggle: (id: number) => void;
   onDelete: (id: number) => void;
   onSelect: (plan: PlannerPlan) => void;
+  conflict?: boolean;
 }) {
   const [showActions, setShowActions] = useState(false);
   const duration = plan.durationMinutes;
@@ -615,8 +627,12 @@ function SessionCard({ plan, onToggle, onDelete, onSelect }: {
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.8, transition: { duration: 0.15 } }}
       whileHover={{ scale: 1.03, zIndex: 10 }}
-      className="rounded-lg p-2 h-full cursor-pointer relative group"
-      style={{ background: `${plan.color}12`, border: `1px solid ${plan.color}25` }}
+      className="rounded-lg p-2 h-full cursor-pointer relative group overflow-hidden"
+      style={{
+        background: `${plan.color}12`,
+        border: `1px solid ${conflict ? "rgba(239,68,68,.6)" : plan.color + "25"}`,
+        boxShadow: conflict ? "0 0 0 1px rgba(239,68,68,.4)" : undefined,
+      }}
       data-hover="true"
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
@@ -671,6 +687,7 @@ function SessionCard({ plan, onToggle, onDelete, onSelect }: {
           className="text-[10px] font-semibold truncate"
           style={{ color: isCompleted ? 'var(--text-muted)' : plan.color, textDecoration: isCompleted ? 'line-through' : 'none' }}
         >
+          {conflict && <AlertTriangle className="h-2.5 w-2.5 inline mr-0.5 text-red-400" />}
           {plan.title}
         </span>
       </motion.div>
@@ -686,11 +703,13 @@ function SessionCard({ plan, onToggle, onDelete, onSelect }: {
   );
 }
 
-function SortableSessionCard({ plan, onToggle, onDelete, onSelect }: {
+function SortableSessionCard({ plan, onToggle, onDelete, onSelect, gridStyle, conflict = false }: {
   plan: PlannerPlan;
   onToggle: (id: number) => void;
   onDelete: (id: number) => void;
   onSelect: (plan: PlannerPlan) => void;
+  gridStyle?: React.CSSProperties;
+  conflict?: boolean;
 }) {
   const {
     attributes,
@@ -701,11 +720,12 @@ function SortableSessionCard({ plan, onToggle, onDelete, onSelect }: {
     isDragging,
   } = useSortable({ id: plan.id });
 
-  const style = {
+  const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 50 : undefined,
+    ...gridStyle,
   };
 
   return (
@@ -713,21 +733,22 @@ function SortableSessionCard({ plan, onToggle, onDelete, onSelect }: {
       <div
         {...attributes}
         {...listeners}
-        className="absolute top-0.5 left-0.5 z-30 cursor-grab active:cursor-grabbing p-0.5 rounded"
+        className="absolute top-0.5 left-0.5 z-30 cursor-grab active:cursor-grabbing p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
         style={{ background: 'var(--bg-void)' }}
       >
         <GripVertical className="h-2.5 w-2.5 text-white/70" />
       </div>
-      <SessionCard plan={plan} onToggle={onToggle} onDelete={onDelete} onSelect={onSelect} />
+      <SessionCard plan={plan} onToggle={onToggle} onDelete={onDelete} onSelect={onSelect} conflict={conflict} />
     </div>
   );
 }
 
-function SessionDetailPanel({ plan, onClose, onToggle, onDelete }: {
+function SessionDetailPanel({ plan, onClose, onToggle, onDelete, onChanged }: {
   plan: PlannerPlan | null;
   onClose: () => void;
   onToggle: (id: number) => void;
   onDelete: (id: number) => void;
+  onChanged?: () => void;
 }) {
   if (!plan) return null;
   const duration = plan.durationMinutes;
@@ -824,6 +845,37 @@ function SessionDetailPanel({ plan, onClose, onToggle, onDelete }: {
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
+                onClick={async () => {
+                  try {
+                    await plannersApi.update(plan.id, { dayOfWeek: (plan.dayOfWeek + 1) % 7 });
+                    onChanged?.();
+                    onClose();
+                  } catch { /* ignore */ }
+                }}
+                title="Move to tomorrow"
+                className="py-3 px-3 rounded-xl text-sm font-semibold flex items-center justify-center"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)' }}
+              >
+                <ArrowRight className="h-4 w-4" />
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={async () => {
+                  try {
+                    await plannersApi.expand(plan.id);
+                    onChanged?.();
+                  } catch { /* ignore */ }
+                }}
+                title="Expand recurring instances"
+                className="py-3 px-3 rounded-xl text-sm font-semibold flex items-center justify-center"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)' }}
+              >
+                <GitBranch className="h-4 w-4" />
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
                 onClick={() => { onDelete(plan.id); onClose(); }}
                 className="py-3 px-4 rounded-xl text-sm font-semibold flex items-center justify-center gap-2"
                 style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', color: 'rgb(239, 68, 68)' }}
@@ -842,6 +894,7 @@ function PomodoroTimer({ plan, onComplete }: { plan: PlannerPlan; onComplete: ()
   const [seconds, setSeconds] = useState(0);
   const [running, setRunning] = useState(false);
   const [sessionId, setSessionId] = useState<number | null>(null);
+  const [showRating, setShowRating] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -855,6 +908,7 @@ function PomodoroTimer({ plan, onComplete }: { plan: PlannerPlan; onComplete: ()
       const session = await studySessionsApi.start({ planId: plan.id, deckId: plan.deckId || undefined });
       setSessionId(session.id);
     } catch { /* ignore */ }
+    setShowRating(false);
     setRunning(true);
     intervalRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
   };
@@ -871,12 +925,47 @@ function PomodoroTimer({ plan, onComplete }: { plan: PlannerPlan; onComplete: ()
         await studySessionsApi.end(sessionId, {});
       } catch { /* ignore */ }
     }
+    setShowRating(true);
+  };
+
+  const rate = async (focusRating: number) => {
+    if (sessionId) {
+      try {
+        await studySessionsApi.end(sessionId, { focusRating });
+      } catch { /* ignore */ }
+    }
+    setShowRating(false);
     onComplete();
   };
 
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   const progress = Math.min(100, (seconds / (plan.durationMinutes * 60)) * 100);
+
+  if (showRating) {
+    return (
+      <div className="mt-2">
+        <p className="text-[10px] text-text-muted mb-1">How was your focus?</p>
+        <div className="flex gap-2">
+          {[
+            { label: "Hard", value: 2, color: "#ef4444" },
+            { label: "Ok", value: 3, color: "#f59e0b" },
+            { label: "Easy", value: 5, color: "#22c55e" },
+          ].map((r) => (
+            <motion.button
+              key={r.value}
+              whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              onClick={() => rate(r.value)}
+              className="flex-1 py-1.5 rounded-lg text-[11px] font-semibold"
+              style={{ background: `${r.color}18`, border: `1px solid ${r.color}40`, color: r.color }}
+            >
+              {r.label}
+            </motion.button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-3 mt-2">
@@ -916,7 +1005,7 @@ function PomodoroTimer({ plan, onComplete }: { plan: PlannerPlan; onComplete: ()
 
 export default function Planner() {
   const [weekOffset, setWeekOffset] = useState(0);
-  const [view, setView] = useState<'week' | 'today' | 'analytics'>('week');
+  const [view, setView] = useState<PlannerView>('week');
   const [plans, setPlans] = useState<PlannerPlan[]>([]);
   const [sessionStats, setSessionStats] = useState<StudySessionStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -931,6 +1020,10 @@ export default function Planner() {
   const [showConfetti, setShowConfetti] = useState(false);
   const [dailyGoal, setDailyGoal] = useState(3);
   const [streak, setStreak] = useState(0);
+  const [exams, setExams] = useState<StudyExam[]>([]);
+  const [heatmap, setHeatmap] = useState<Array<{ date: string; plannedMinutes: number; actualMinutes: number; sessionsCompleted: number; hasActivity: boolean }>>([]);
+  const [subjectFilter, setSubjectFilter] = useState<string | null>(null);
+  const [nowOpen, setNowOpen] = useState(false);
   const { setHidden } = useNavbarVisibility();
   const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const [dragUndo, setDragUndo] = useState<{ planId: number; fromDay: number; fromHour: number; toDay: number; toHour: number } | null>(null);
@@ -974,12 +1067,39 @@ export default function Planner() {
         const tplData = await plannerTemplatesApi.list();
         setTemplates(tplData);
       } catch { /* ignore */ }
+      try {
+        const examData = await examsApi.list();
+        setExams(examData);
+      } catch { /* ignore */ }
+      try {
+        const hm = await plannersApi.streakHistory(120);
+        setHeatmap(hm.days);
+      } catch { /* ignore */ }
     } catch (err) {
       setError((err as Error).message || 'Failed to load plans');
     } finally {
       setLoading(false);
     }
   }, [view]);
+
+  const [focusAvg, setFocusAvg] = useState<number | null>(null);
+
+  const fetchFocusAvg = useCallback(async () => {
+    try {
+      const res = await studySessionsApi.history(300);
+      const rated = res.sessions.filter((s) => s.focusRating != null && s.focusRating > 0);
+      if (rated.length === 0) {
+        setFocusAvg(null);
+        return;
+      }
+      const avg = rated.reduce((a, s) => a + (s.focusRating || 0), 0) / rated.length;
+      setFocusAvg(avg);
+    } catch {
+      setFocusAvg(null);
+    }
+  }, []);
+
+  useEffect(() => { fetchFocusAvg(); }, [fetchFocusAvg]);
 
   useEffect(() => {
     fetchPlans();
@@ -1011,6 +1131,48 @@ export default function Planner() {
     const completedMinutes = todayTopics.filter(p => p.completed === true || p.completed === 1).reduce((s, p) => s + p.durationMinutes, 0);
     return { total, completed, totalMinutes, completedMinutes };
   }, [todayTopics]);
+
+  // Date numbers for the visible week (Mon..Sun)
+  const weekDates = useMemo(() => {
+    const now = new Date();
+    const jsToday = now.getDay();
+    const adjustedToday = jsToday === 0 ? 6 : jsToday - 1;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - adjustedToday + weekOffset * 7);
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      return d;
+    });
+  }, [weekOffset]);
+
+  // Per-plan overlap grouping for side-by-side rendering + conflict styling
+  const overlapGroups = useMemo(() => {
+    const byDay: Record<number, PlannerPlan[]> = {};
+    weekSchedule.forEach((p) => { (byDay[p.dayOfWeek] ||= []).push(p); });
+    const info: Record<number, { peers: number; index: number }> = {};
+    Object.values(byDay).forEach((list) => {
+      list.forEach((p) => {
+        const peers = list.filter(
+          (q) => q.id !== p.id && q.startHour * 60 < p.startHour * 60 + p.durationMinutes && p.startHour * 60 < q.startHour * 60 + q.durationMinutes,
+        );
+        const all = [p, ...peers].sort((a, b) => a.startHour - b.startHour || a.id - b.id);
+        info[p.id] = { peers: all.length, index: all.findIndex((x) => x.id === p.id) };
+      });
+    });
+    return info;
+  }, [weekSchedule]);
+
+  const conflictCount = useMemo(() => weekSchedule.filter((p) => p.hasConflict).length, [weekSchedule]);
+  const filteredSchedule = subjectFilter ? weekSchedule.filter((p) => p.color === subjectFilter) : weekSchedule;
+  const ROW_H = 56;
+
+  const nextSession = useMemo(() => {
+    const upcoming = weekSchedule
+      .filter((p) => p.completed !== true && p.completed !== 1)
+      .sort((a, b) => a.dayOfWeek - b.dayOfWeek || a.startHour - b.startHour);
+    return upcoming[0] || null;
+  }, [weekSchedule]);
 
   const handleToggle = useCallback(async (id: number) => {
     const plan = plans.find(p => p.id === id);
@@ -1095,6 +1257,35 @@ export default function Planner() {
     }
   }, [showConfetti]);
 
+  const handleExportIcs = useCallback(async () => {
+    try {
+      const ics = await plannersApi.exportIcs();
+      const blob = new Blob([ics], { type: 'text/calendar' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mednexus-week.ics';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleExportPdf = useCallback(() => {
+    const rows = weekSchedule
+      .slice()
+      .sort((a, b) => a.dayOfWeek - b.dayOfWeek || a.startHour - b.startHour)
+      .map((p) => `<tr><td style="padding:6px 10px;border:1px solid #ccc">${DAYS[p.dayOfWeek]}</td><td style="padding:6px 10px;border:1px solid #ccc">${p.startHour}:00</td><td style="padding:6px 10px;border:1px solid #ccc">${p.durationMinutes}m</td><td style="padding:6px 10px;border:1px solid #ccc">${p.title}</td></tr>`)
+      .join('');
+    const html = `<!doctype html><html><head><title>MedNexus Study Week</title></head><body style="font-family:sans-serif"><h1>MedNexus Study Week</h1><table style="border-collapse:collapse;width:100%"><thead><tr><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Day</th><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Start</th><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Duration</th><th style="padding:6px 10px;border:1px solid #ccc;text-align:left">Session</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    const w = window.open('', '_blank');
+    if (w) {
+      w.document.write(html);
+      w.document.close();
+      w.focus();
+      setTimeout(() => w.print(), 250);
+    }
+  }, [weekSchedule]);
+
   const tabItems = [
     { id: 'week' as const, label: 'Week' },
     { id: 'today' as const, label: 'Today' },
@@ -1107,7 +1298,17 @@ export default function Planner() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] as const }}
     >
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+      {/* Decorative drifting orbs behind the glass (and a calmer canvas over the starfield) */}
+      <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+        <div className="absolute inset-0" style={{ background: 'rgba(2, 6, 23, 0.4)' }} />
+        <div className="planner-orb-1 absolute -top-32 -left-24 w-[28rem] h-[28rem] rounded-full opacity-30 blur-3xl" style={{ background: 'radial-gradient(circle, rgba(6,182,212,.5), transparent 70%)' }} />
+        <div className="planner-orb-2 absolute top-1/3 -right-24 w-[26rem] h-[26rem] rounded-full opacity-25 blur-3xl" style={{ background: 'radial-gradient(circle, rgba(139,92,246,.5), transparent 70%)' }} />
+        <div className="planner-orb-3 absolute bottom-0 left-1/3 w-[24rem] h-[24rem] rounded-full opacity-20 blur-3xl" style={{ background: 'radial-gradient(circle, rgba(34,197,94,.4), transparent 70%)' }} />
+      </div>
+
+      <PlannerSidebar view={view} onChange={(v) => setView(v)} badges={{ today: todayTopics.length, exams: exams.length }} />
+
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 mt-4">
         <motion.div
           initial={{ opacity: 0, x: -20 }}
           animate={{ opacity: 1, x: 0 }}
@@ -1115,12 +1316,13 @@ export default function Planner() {
         >
           <h1 className="font-display text-2xl sm:text-3xl font-bold text-text-primary tracking-tight">Study Planner</h1>
           <p className="text-text-secondary text-sm mt-1">Plan and track your study schedule</p>
+          <div className="mt-3 max-w-xs"><ExamCountdown exams={exams} /></div>
         </motion.div>
         <motion.div
           initial={{ opacity: 0, x: 20 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ delay: 0.15, ...smoothTransition }}
-          className="flex items-center gap-2"
+          className="flex items-center gap-2 flex-wrap"
         >
           <motion.button
             whileHover={{ scale: 1.05 }}
@@ -1131,7 +1333,31 @@ export default function Planner() {
           >
             <RefreshCw className="h-4 w-4" />
           </motion.button>
-          <AnimatedTabs tabs={tabItems} activeTab={view} onChange={(id) => setView(id as 'week' | 'today')} />
+          {view === 'week' && (
+            <>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={handleExportIcs}
+                title="Export week as .ics"
+                className="p-2 rounded-xl text-text-secondary hover:text-text-primary transition-colors"
+                style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-default)' }}
+              >
+                <Download className="h-4 w-4" />
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={handleExportPdf}
+                title="Export week as PDF"
+                className="p-2 rounded-xl text-text-secondary hover:text-text-primary transition-colors"
+                style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-default)' }}
+              >
+                <Printer className="h-4 w-4" />
+              </motion.button>
+            </>
+          )}
+          <AnimatedTabs tabs={tabItems} activeTab={view} onChange={(id) => setView(id as PlannerView)} />
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -1178,7 +1404,33 @@ export default function Planner() {
         <AnimatePresence mode="wait">
           {view === 'analytics' ? (
             <motion.div key="analytics-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-              <AnalyticsView plans={plans} stats={sessionStats} streak={streak} />
+              <AnalyticsView plans={plans} stats={sessionStats} streak={streak} heatmap={heatmap} focusRatingAvg={focusAvg} />
+            </motion.div>
+          ) : view === 'exams' ? (
+            <motion.div key="exams-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+              <ExamsPanel exams={exams} onChanged={fetchPlans} />
+            </motion.div>
+          ) : view === 'focus' ? (
+            <motion.div key="focus-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+              <div className="rounded-3xl p-8 text-center" style={glassThick}>
+                <div className="w-16 h-16 mx-auto mb-4 rounded-2xl flex items-center justify-center" style={{ background: 'rgba(6,182,212,.12)', border: '1px solid var(--glass-border)' }}>
+                  <Focus className="h-8 w-8 text-accent-green" />
+                </div>
+                <h2 className="font-display text-xl font-bold text-text-primary mb-1">Focus / Now Mode</h2>
+                <p className="text-text-secondary text-sm mb-1">Pomodoro 25 / 5 / 15 driven by your next session.</p>
+                <p className="text-sm text-text-primary mb-5">
+                  {nextSession ? <>Next up: <span style={{ color: nextSession.color }}>{nextSession.title}</span> · {nextSession.startHour}:00</> : 'No scheduled sessions yet.'}
+                </p>
+                <motion.button
+                  whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                  onClick={() => setNowOpen(true)}
+                  disabled={!nextSession}
+                  className="px-6 py-3 rounded-xl text-white font-semibold inline-flex items-center gap-2"
+                  style={{ background: nextSession ? 'linear-gradient(135deg, var(--accent-green), var(--accent-blue))' : 'var(--bg-elevated)', opacity: nextSession ? 1 : 0.5 }}
+                >
+                  <Play className="h-4 w-4" /> Start Focus Session
+                </motion.button>
+              </div>
             </motion.div>
           ) : view === 'week' ? (
             <motion.div key="week-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
@@ -1223,7 +1475,7 @@ export default function Planner() {
                   { label: 'Study Hours', value: `${Math.floor(weekStats.completedMinutes / 60)}/${Math.floor(weekStats.totalMinutes / 60)}`, icon: Timer, color: 'var(--accent-purple)' },
                   { label: 'Day Streak', value: streak, icon: Flame, color: 'var(--accent-amber)' },
                 ].map(({ label, value, icon: Icon, color }, idx) => (
-                  <motion.div key={label} variants={itemVariant} className="rounded-2xl p-4 relative overflow-hidden" style={glassStyle}>
+                  <motion.div key={label} variants={listItem} className="rounded-2xl p-4 relative overflow-hidden" style={glassStyle}>
                     <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent" />
                     <Icon className="h-5 w-5 mb-2" style={{ color }} />
                     <motion.p
@@ -1241,11 +1493,35 @@ export default function Planner() {
                 ))}
               </motion.div>
 
+              {conflictCount > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-4 flex items-center gap-2 p-3 rounded-xl"
+                  style={{ background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.2)' }}
+                >
+                  <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
+                  <span className="text-xs text-red-400">{conflictCount} session{conflictCount > 1 ? 's' : ''} overlap{conflictCount > 1 ? '' : 's'} another session — shown side by side.</span>
+                </motion.div>
+              )}
+
+              <div className="mb-4"><SubjectLegend plans={weekSchedule} activeColor={subjectFilter} onSelect={setSubjectFilter} /></div>
+
+              {weekSchedule.length === 0 && (
+                <EmptyState onAdd={() => { setEditingPlan(null); setShowAddModal(true); }} onAI={() => setShowAIModal(true)} hasExams={exams.length > 0} />
+              )}
+
+              {weekSchedule.length > 0 && (
+              <>
               <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                <SortableContext items={weekSchedule.map(p => p.id)} strategy={rectSortingStrategy}>
-                  <div className="rounded-2xl overflow-hidden relative" style={glassStyle}>
+                <SortableContext items={filteredSchedule.map(p => p.id)} strategy={rectSortingStrategy}>
+                  <div className="rounded-2xl overflow-hidden relative" style={glassThick}>
                     <Confetti show={showConfetti} />
-                    <div className="grid grid-cols-8" style={{ borderBottom: '1px solid rgba(148, 163, 184, 0.08)' }}>
+                    {/* Header row */}
+                    <div
+                      className="grid sticky top-0 z-20"
+                      style={{ gridTemplateColumns: '64px repeat(7, minmax(0,1fr))', background: 'var(--glass-card-bg)', backdropFilter: 'blur(14px)', borderBottom: '1px solid rgba(148,163,184,.10)' }}
+                    >
                       <div className="p-3 text-xs font-medium text-text-muted">Time</div>
                       {DAYS.map((day, i) => (
                         <motion.div key={day} className="p-3 text-center" whileHover={{ background: 'rgba(148, 163, 184, 0.04)' }}>
@@ -1255,39 +1531,62 @@ export default function Planner() {
                             animate={i === adjustedTodayIdx && weekOffset === 0 ? { scale: [1, 1.05, 1] } : {}}
                             transition={{ duration: 2, repeat: Infinity }}
                           >
-                            {15 + i}
+                            {weekDates[i].getDate()}
                           </motion.div>
                         </motion.div>
                       ))}
                     </div>
-                    <div className="max-h-[500px] overflow-y-auto">
+                    {/* Body grid — duration-spanning blocks */}
+                    <div
+                      className="relative"
+                      style={{ display: 'grid', gridTemplateColumns: '64px repeat(7, minmax(0,1fr))', gridTemplateRows: `repeat(${HOURS.length}, ${ROW_H}px)`, maxHeight: 580, overflowY: 'auto' }}
+                    >
                       {HOURS.map((hour, hourIdx) => (
-                        <motion.div
-                          key={hour}
-                          className="grid grid-cols-8"
-                          style={{ borderBottom: '1px solid rgba(148, 163, 184, 0.04)', minHeight: 60 }}
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          transition={{ delay: hourIdx * 0.015 }}
+                        <div
+                          key={`t-${hour}`}
+                          style={{ gridColumn: 1, gridRow: hourIdx + 1, borderBottom: '1px solid rgba(148,163,184,.05)' }}
+                          className="p-2 text-xs text-text-muted font-mono flex items-start justify-center"
                         >
-                          <div className="p-2 text-xs text-text-muted font-mono flex items-start justify-center">{hour}:00</div>
-                          {DAYS.map((_, dayIdx) => {
-                            const plan = weekSchedule.find(p => p.dayOfWeek === dayIdx && p.startHour === hour);
-                            return (
-                              <div key={dayIdx} className="p-0.5 relative" id={`cell-${dayIdx}-${hour}`}>
-                                {plan ? (
-                                  <SortableSessionCard
-                                    plan={plan}
-                                    onToggle={handleToggle}
-                                    onDelete={handleDelete}
-                                    onSelect={setSelectedSession}
-                                  />
-                                ) : null}
-                              </div>
-                            );
-                          })}
-                        </motion.div>
+                          {hour}:00
+                        </div>
                       ))}
+                      {DAYS.map((_, dayIdx) =>
+                        HOURS.map((hour, hi) => (
+                          <div
+                            key={`c-${dayIdx}-${hour}`}
+                            id={`cell-${dayIdx}-${hour}`}
+                            style={{ gridColumn: dayIdx + 2, gridRow: hi + 1, borderBottom: '1px solid rgba(148,163,184,.04)', borderRight: '1px solid rgba(148,163,184,.03)' }}
+                          />
+                        )),
+                      )}
+                      {filteredSchedule.map((plan) => {
+                        if (plan.startHour < HOURS[0] || plan.startHour > HOURS[HOURS.length - 1]) return null;
+                        const rowStart = plan.startHour - HOURS[0] + 1;
+                        const span = Math.max(1, Math.ceil(plan.durationMinutes / 60));
+                        const grp = overlapGroups[plan.id] || { peers: 1, index: 0 };
+                        const widthPct = 100 / grp.peers;
+                        const leftPct = grp.index * widthPct;
+                        return (
+                          <SortableSessionCard
+                            key={plan.id}
+                            plan={plan}
+                            onToggle={handleToggle}
+                            onDelete={handleDelete}
+                            onSelect={setSelectedSession}
+                            conflict={!!plan.hasConflict}
+                            gridStyle={{
+                              gridColumn: plan.dayOfWeek + 2,
+                              gridRow: `${rowStart} / span ${span}`,
+                              width: `${widthPct}%`,
+                              marginLeft: `${leftPct}%`,
+                              alignSelf: 'start',
+                              justifySelf: 'start',
+                              minWidth: 0,
+                              zIndex: plan.hasConflict ? 20 : 10,
+                            }}
+                          />
+                        );
+                      })}
                     </div>
                   </div>
                 </SortableContext>
@@ -1347,6 +1646,23 @@ export default function Planner() {
                   )}
                 </div>
               </motion.div>
+              </>
+              )}
+              {heatmap.length > 0 && (
+                <motion.div
+                  className="mt-6 rounded-2xl p-5"
+                  style={glassStyle}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.35, ...smoothTransition }}
+                >
+                  <div className="flex items-center gap-2 mb-3">
+                    <Flame className="h-4 w-4 text-accent-amber" />
+                    <span className="text-sm font-display font-semibold text-text-secondary tracking-wider uppercase">Study Streak · Last 120 Days</span>
+                  </div>
+                  <StreakHeatmap days={heatmap} compact />
+                </motion.div>
+              )}
             </motion.div>
           ) : (
             <motion.div key="today-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
@@ -1362,7 +1678,7 @@ export default function Planner() {
                   { label: 'Hours', value: `${Math.floor(todayStats.completedMinutes / 60)}/${Math.floor(todayStats.totalMinutes / 60)}`, icon: Clock, color: 'var(--accent-purple)' },
                   { label: 'Goal', value: `${todayStats.completed}/${dailyGoal}`, icon: Target, color: 'var(--accent-amber)' },
                 ].map(({ label, value, icon: Icon, color }, idx) => (
-                  <motion.div key={label} variants={itemVariant} className="rounded-2xl p-4 relative overflow-hidden" style={glassStyle}>
+                  <motion.div key={label} variants={listItem} className="rounded-2xl p-4 relative overflow-hidden" style={glassStyle}>
                     <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent" />
                     <Icon className="h-5 w-5 mb-2" style={{ color }} />
                     <motion.p
@@ -1462,7 +1778,7 @@ export default function Planner() {
                       return (
                         <motion.div
                           key={plan.id}
-                          variants={itemVariant}
+                          variants={listItem}
                           layout
                           whileHover={{ x: 4, transition: { duration: 0.2 } }}
                           className="rounded-2xl p-4 flex items-center gap-4 cursor-pointer relative overflow-hidden group"
@@ -1538,6 +1854,7 @@ export default function Planner() {
         onClose={() => setSelectedSession(null)}
         onToggle={handleToggle}
         onDelete={handleDelete}
+        onChanged={fetchPlans}
       />
       <AnimatePresence>
         {selectedSession && (
@@ -1556,7 +1873,10 @@ export default function Planner() {
         onClose={() => setShowAIModal(false)}
         onPlansCreated={fetchPlans}
         decks={decks}
+        existingSessions={weekSchedule.map((p) => ({ title: p.title, dayOfWeek: p.dayOfWeek, startHour: p.startHour, durationMinutes: p.durationMinutes }))}
       />
+
+      {nowOpen && <FocusNowModal plan={nextSession} onClose={() => setNowOpen(false)} />}
 
       {templates.length > 0 && (
         <motion.div

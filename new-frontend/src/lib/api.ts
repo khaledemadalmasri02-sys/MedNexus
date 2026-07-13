@@ -942,6 +942,7 @@ export interface PlannerPlan {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  hasConflict?: boolean;
 }
 
 export interface PlannerWeekStats {
@@ -969,6 +970,7 @@ export interface StudySession {
   cardsStudied: number;
   knownCount: number | null;
   unknownCount: number | null;
+  focusRating: number | null;
   createdAt: string;
 }
 
@@ -1012,6 +1014,81 @@ export const plannersApi = {
     apiFetch<PlannerPlan>(`${PLANNERS_BASE}/${id}/uncomplete`, { method: "POST" }),
 
   streak: () => apiFetch<{ currentStreak: number }>(`${PLANNERS_BASE}/streak`),
+
+  expand: (id: number, weeks?: number) =>
+    apiFetch<{ planId: number; weeks: number; created: number }>(`${PLANNERS_BASE}/${id}/expand`, {
+      method: "POST",
+      body: JSON.stringify({ weeks }),
+    }),
+
+  instances: (weeks?: number) =>
+    apiFetch<Array<{
+      id: number;
+      planId: number;
+      userId: string | null;
+      occurrenceDate: string;
+      dayOfWeek: number;
+      startHour: number;
+      durationMinutes: number;
+      title: string;
+      description: string | null;
+      color: string;
+      deckId: number | null;
+      createdAt: string;
+    }>>(`${PLANNERS_BASE}/instances${weeks ? `?weeks=${weeks}` : ""}`),
+
+  overlaps: () =>
+    apiFetch<{ overlaps: Array<{ aId: number; bId: number; dayOfWeek: number; aTitle: string; bTitle: string }>; conflictedIds: number[] }>(`${PLANNERS_BASE}/overlaps`),
+
+  reminders: () =>
+    apiFetch<Array<{
+      id: number;
+      title: string;
+      dayOfWeek: number;
+      startHour: number;
+      durationMinutes: number;
+      color: string;
+      at: string;
+      leadMinutes: number;
+    }>>(`${PLANNERS_BASE}/reminders`),
+
+  streakHistory: (days?: number) =>
+    apiFetch<{ days: Array<{ date: string; plannedMinutes: number; actualMinutes: number; sessionsCompleted: number; hasActivity: boolean }> }>(`${PLANNERS_BASE}/streak-history${days ? `?days=${days}` : ""}`),
+
+  exportIcs: () => {
+    const url = `${API_BASE_URL}${PLANNERS_BASE}/export/ics`;
+    return fetch(url, { credentials: "include" }).then((r) => r.text());
+  },
+};
+
+export interface StudyExam {
+  id: number;
+  userId: string | null;
+  title: string;
+  subject: string | null;
+  examDate: string;
+  color: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const examsApi = {
+  list: () => apiFetch<StudyExam[]>("/study-exams"),
+
+  create: (data: { title: string; subject?: string; examDate: string; color?: string }) =>
+    apiFetch<StudyExam>("/study-exams", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  update: (id: number, data: Partial<{ title: string; subject: string; examDate: string; color: string }>) =>
+    apiFetch<StudyExam>(`/study-exams/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+
+  delete: (id: number) =>
+    apiFetch<void>(`/study-exams/${id}`, { method: "DELETE" }),
 };
 
 export const studySessionsApi = {
@@ -1027,7 +1104,7 @@ export const studySessionsApi = {
       body: JSON.stringify(data),
     }),
 
-  end: (id: number, data: { cardsStudied?: number; knownCount?: number; unknownCount?: number }) =>
+  end: (id: number, data: { cardsStudied?: number; knownCount?: number; unknownCount?: number; focusRating?: number }) =>
     apiFetch<StudySession>(`${STUDY_SESSIONS_BASE}/${id}/end`, {
       method: "POST",
       body: JSON.stringify(data),
@@ -1093,7 +1170,7 @@ export const plannerTemplatesApi = {
 };
 
 export const plannerGenerateApi = {
-  generate: (data: { examDate: string; studyDays: number[]; hoursPerDay: number; deckIds?: number[] }) =>
+  generate: (data: { examDate: string; studyDays: number[]; hoursPerDay: number; deckIds?: number[]; existingSessions?: Array<{ title: string; dayOfWeek: number; startHour: number; durationMinutes: number }> }) =>
     apiFetch<{ sessions: GeneratedPlanSession[]; daysUntilExam: number; studyDays: string }>("/planners/generate", {
       method: "POST",
       body: JSON.stringify(data),

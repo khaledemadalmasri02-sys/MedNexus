@@ -20,7 +20,7 @@ function templateOwnerFilter(userId: string | null) {
 router.post("/generate", validateBody(generatePlanSchema), async (req: Request, res: Response) => {
   try {
     const userId = getUserId(req);
-    const { examDate, studyDays, hoursPerDay, deckIds } = req.body;
+    const { examDate, studyDays, hoursPerDay, deckIds, existingSessions } = req.body;
 
     if (!examDate || !studyDays || !hoursPerDay) {
       res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "examDate, studyDays, and hoursPerDay are required" } });
@@ -61,6 +61,9 @@ router.post("/generate", validateBody(generatePlanSchema), async (req: Request, 
 - Source decks: ${deckInfo.map(d => `${d.name} (${d.cardCount} cards)`).join(', ') || 'General study'}
 
 Sample topics from decks: ${deckInfo.map(d => `${d.name}: ${d.sampleCards.join('; ')}`).join('\n')}
+
+${existingSessions && existingSessions.length > 0 ? `ALREADY-SCHEDULED SESSIONS (do NOT overlap these; pick different times/days or stack reviews around them):
+${existingSessions.map((s: { title: string; dayOfWeek: number; startHour: number; durationMinutes: number }) => `- ${s.title} on day ${s.dayOfWeek} at ${s.startHour}:00 for ${s.durationMinutes}min`).join('\n')}` : ''}
 
 Return a JSON array of study sessions:
 [{

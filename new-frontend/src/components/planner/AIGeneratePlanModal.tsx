@@ -14,9 +14,10 @@ interface AIGeneratePlanModalProps {
   onClose: () => void;
   onPlansCreated: () => void;
   decks: Deck[];
+  existingSessions?: Array<{ title: string; dayOfWeek: number; startHour: number; durationMinutes: number }>;
 }
 
-export default function AIGeneratePlanModal({ isOpen, onClose, onPlansCreated, decks }: AIGeneratePlanModalProps) {
+export default function AIGeneratePlanModal({ isOpen, onClose, onPlansCreated, decks, existingSessions }: AIGeneratePlanModalProps) {
   const [step, setStep] = useState<'config' | 'preview' | 'creating' | 'done'>('config');
   const [examDate, setExamDate] = useState('');
   const [studyDays, setStudyDays] = useState<number[]>([0, 1, 2, 3, 4]);
@@ -44,6 +45,7 @@ export default function AIGeneratePlanModal({ isOpen, onClose, onPlansCreated, d
         studyDays,
         hoursPerDay,
         deckIds: selectedDecks.length > 0 ? selectedDecks : undefined,
+        existingSessions: existingSessions && existingSessions.length > 0 ? existingSessions : undefined,
       });
       setGeneratedSessions(result.sessions);
       setStep('preview');

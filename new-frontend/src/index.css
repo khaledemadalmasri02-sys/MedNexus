@@ -68,7 +68,7 @@ body {
 }
 
 @media print {
-  nav, aside, .print\\:hidden,
+  nav, aside,
   [data-print-hidden="true"] {
     display: none !important;
   }
@@ -83,3 +83,21 @@ body {
     transition: none !important;
   }
 }
+
+/* Planner: drifting gradient orbs + rail scrollbar */
+@keyframes plannerDrift1 {
+  0% { transform: translate(0, 0); }
+  50% { transform: translate(40px, -30px); }
+  100% { transform: translate(0, 0); }
+}
+@keyframes plannerDrift2 {
+  0% { transform: translate(0, 0); }
+  50% { transform: translate(-50px, 30px); }
+  100% { transform: translate(0, 0); }
+}
+.planner-orb-1 { animation: plannerDrift1 18s ease-in-out infinite !important; }
+.planner-orb-2 { animation: plannerDrift2 22s ease-in-out infinite !important; }
+.planner-orb-3 { animation: plannerDrift1 26s ease-in-out infinite reverse !important; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

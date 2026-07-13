@@ -4,7 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell,
 } from "recharts";
-import { BarChart3, Clock, Flame, TrendingUp, BookOpen, Target } from "lucide-react";
+import { BarChart3, Clock, Flame, TrendingUp, BookOpen, Target, Focus, Star } from "lucide-react";
 import { smoothTransition, staggerContainer } from "../../components/ui/constants";
 import type { PlannerPlan, StudySessionStats } from "../../lib/api";
 
@@ -26,9 +26,11 @@ interface AnalyticsViewProps {
   plans: PlannerPlan[];
   stats: StudySessionStats | null;
   streak: number;
+  heatmap?: Array<{ date: string; plannedMinutes: number; actualMinutes: number; sessionsCompleted: number; hasActivity: boolean }>;
+  focusRatingAvg?: number | null;
 }
 
-export default function AnalyticsView({ plans, stats, streak }: AnalyticsViewProps) {
+export default function AnalyticsView({ plans, stats, streak, heatmap, focusRatingAvg }: AnalyticsViewProps) {
   const weekMinutes = useMemo(() => plans.reduce((s, p) => s + p.durationMinutes, 0), [plans]);
 
   const completionRate = useMemo(() => {
@@ -186,6 +188,63 @@ export default function AnalyticsView({ plans, stats, streak }: AnalyticsViewPro
                 </div>
               ))}
             </div>
+          </div>
+        </motion.div>
+      )}
+
+      {focusRatingAvg != null && (
+        <motion.div
+          className="rounded-2xl p-5 mb-6" style={glassStyle}
+          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25, ...smoothTransition }}
+        >
+          <div className="flex items-center gap-2 mb-3">
+            <Focus className="h-4 w-4 text-accent-blue" />
+            <span className="text-sm font-display font-semibold text-text-secondary tracking-wider uppercase">Avg Focus Rating</span>
+          </div>
+          <div className="flex items-end gap-3">
+            <p className="text-4xl font-bold font-display text-text-primary">{focusRatingAvg.toFixed(1)}<span className="text-lg text-text-muted">/5</span></p>
+            <div className="flex gap-1 mb-1">
+              {[1, 2, 3, 4, 5].map((s) => (
+                <Star key={s} className="h-4 w-4" style={{ color: s <= Math.round(focusRatingAvg) ? 'var(--accent-amber)' : 'var(--border-subtle)' }} fill={s <= Math.round(focusRatingAvg) ? 'var(--accent-amber)' : 'none'} />
+              ))}
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {heatmap && heatmap.length > 0 && (
+        <motion.div
+          className="rounded-2xl p-5" style={glassStyle}
+          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3, ...smoothTransition }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Flame className="h-4 w-4 text-accent-amber" />
+              <span className="text-sm font-display font-semibold text-text-secondary tracking-wider uppercase">Study Streak History</span>
+            </div>
+            <div className="flex items-center gap-1 text-[10px] text-text-muted">
+              <span>Less</span>
+              {['#1e293b', '#14532d', '#166534', '#16a34a', '#22c55e'].map((c) => (
+                <span key={c} className="w-3 h-3 rounded-sm" style={{ background: c }} />
+              ))}
+              <span>More</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {heatmap.map((d) => {
+              const lvl = d.actualMinutes === 0 ? 0 : Math.min(4, 1 + Math.floor(d.actualMinutes / 60));
+              const colors = ['#1e293b', '#14532d', '#166534', '#16a34a', '#22c55e'];
+              return (
+                <div
+                  key={d.date}
+                  title={`${d.date} · ${d.actualMinutes}m studied`}
+                  className="w-3 h-3 rounded-sm"
+                  style={{ background: colors[lvl] }}
+                />
+              );
+            })}
           </div>
         </motion.div>
       )}

@@ -255,6 +255,12 @@ export const generatePlanSchema = z.object({
   studyDays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
   hoursPerDay: z.number().int().positive().max(24),
   deckIds: z.array(z.number().int().positive()).optional(),
+  existingSessions: z.array(z.object({
+    title: z.string(),
+    dayOfWeek: z.number().int().min(0).max(6),
+    startHour: z.number().int().min(0).max(23),
+    durationMinutes: z.number().int().positive(),
+  })).optional(),
 });
 
 export const batchCreatePlansSchema = z.object({
