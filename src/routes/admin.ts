@@ -1,87 +1,85 @@
-import { Router, Request, Response } from "express";
-import { db, users, errorLogs, feedback } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, and, sql, desc } from "drizzle-orm";
-import { requireAdmin } from "../middleware/auth.js";
+import type { AppEnv } from "../types";
+import { users, errorLogs, feedback } from "../db/index";
+import { getDb, serverError } from "../lib/helpers";
 import { z } from "zod";
-import { logger } from "../lib/logger.js";
 
-const router = Router();
-
-router.use(requireAdmin);
+export const adminRoutes = new Hono<AppEnv>();
 
 const resolveErrorSchema = z.object({
   resolution_notes: z.string().min(1),
   fix_pattern: z.string().min(1),
 });
 
-router.get("/stats", async (_req: Request, res: Response) => {
+adminRoutes.get("/admin/stats", async (c) => {
   try {
+    const db = getDb(c);
     const [userCount] = await db.select({ count: sql<number>`count(*)` }).from(users);
     const [errorCount] = await db.select({ count: sql<number>`count(*)` }).from(errorLogs);
     const [unresolvedCount] = await db.select({ count: sql<number>`count(*)` }).from(errorLogs).where(eq(errorLogs.resolved, false));
     const [feedbackCount] = await db.select({ count: sql<number>`count(*)` }).from(feedback);
 
-    res.json({
+    return c.json({
       totalUsers: userCount?.count || 0,
       totalErrors: errorCount?.count || 0,
       unresolvedErrors: unresolvedCount?.count || 0,
       totalFeedback: feedbackCount?.count || 0,
     });
   } catch (err) {
-    logger.error({ err }, "Admin stats failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get stats" } });
+    return serverError(c, "Failed to get stats");
   }
 });
 
-router.get("/users", async (req: Request, res: Response) => {
+adminRoutes.get("/admin/users", async (c) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const db = getDb(c);
+    const limit = Math.min(parseInt(c.req.query("limit") || "") || 50, 200);
+    const offset = parseInt(c.req.query("offset") || "") || 0;
 
     const allUsers = await db.select().from(users).limit(limit).offset(offset).orderBy(desc(users.createdAt));
     const [count] = await db.select({ count: sql<number>`count(*)` }).from(users);
 
-    res.json({ users: allUsers, total: count?.count || 0, limit, offset });
+    return c.json({ users: allUsers, total: count?.count || 0, limit, offset });
   } catch (err) {
-    logger.error({ err }, "Admin list users failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list users" } });
+    return serverError(c, "Failed to list users");
   }
 });
 
-router.get("/users/:id", async (req: Request, res: Response) => {
+adminRoutes.get("/admin/users/:id", async (c) => {
   try {
-    const userId = req.params.id;
+    const db = getDb(c);
+    const userId = c.req.param("id");
     const [user] = await db.select().from(users).where(eq(users.id, userId));
     if (!user) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "User not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "User not found" } }, 404);
     }
-    res.json(user);
+    return c.json(user);
   } catch (err) {
-    logger.error({ err }, "Admin get user failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get user" } });
+    return serverError(c, "Failed to get user");
   }
 });
 
-router.delete("/users/:id", async (req: Request, res: Response) => {
+adminRoutes.delete("/admin/users/:id", async (c) => {
   try {
-    const userId = req.params.id;
+    const db = getDb(c);
+    const userId = c.req.param("id");
     await db.delete(users).where(eq(users.id, userId));
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
-    logger.error({ err }, "Admin delete user failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete user" } });
+    return serverError(c, "Failed to delete user");
   }
 });
 
-router.get("/errors", async (req: Request, res: Response) => {
+adminRoutes.get("/admin/errors", async (c) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
-    const resolved = req.query.resolved as string | undefined;
-    const model = req.query.model as string | undefined;
+    const db = getDb(c);
+    const limit = Math.min(parseInt(c.req.query("limit") || "") || 50, 200);
+    const offset = parseInt(c.req.query("offset") || "") || 0;
+    const resolved = c.req.query("resolved");
+    const model = c.req.query("model");
 
-    const conditions = [];
+    const conditions = [] as any[];
     if (resolved === "true") conditions.push(eq(errorLogs.resolved, true));
     else if (resolved === "false") conditions.push(eq(errorLogs.resolved, false));
     if (model) conditions.push(eq(errorLogs.model, model));
@@ -94,25 +92,25 @@ router.get("/errors", async (req: Request, res: Response) => {
     const [count] = await db.select({ count: sql<number>`count(*)` }).from(errorLogs)
       .where(conditions.length > 0 ? and(...conditions) : undefined);
 
-    res.json({ errors, total: count?.count || 0, limit, offset });
+    return c.json({ errors, total: count?.count || 0, limit, offset });
   } catch (err) {
-    logger.error({ err }, "Admin list errors failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list errors" } });
+    return serverError(c, "Failed to list errors");
   }
 });
 
-router.post("/errors/:id/resolve", async (req: Request, res: Response) => {
+adminRoutes.post("/admin/errors/:id/resolve", async (c) => {
   try {
-    const errorId = parseInt(req.params.id, 10);
+    const db = getDb(c);
+    const errorId = parseInt(c.req.param("id") || "", 10);
     if (isNaN(errorId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid error ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid error ID" } }, 400);
     }
 
-    const validation = resolveErrorSchema.safeParse(req.body);
+    let body: any = {};
+    try { body = await c.req.json(); } catch { /* no body */ }
+    const validation = resolveErrorSchema.safeParse(body);
     if (!validation.success) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "resolution_notes and fix_pattern required" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "resolution_notes and fix_pattern required" } }, 400);
     }
 
     await db.update(errorLogs).set({
@@ -121,28 +119,28 @@ router.post("/errors/:id/resolve", async (req: Request, res: Response) => {
       fixPattern: validation.data.fix_pattern,
     }).where(eq(errorLogs.id, errorId));
 
-    res.json({ success: true, errorId });
+    return c.json({ success: true, errorId });
   } catch (err) {
-    logger.error({ err }, "Admin resolve error failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to resolve error" } });
+    return serverError(c, "Failed to resolve error");
   }
 });
 
-router.delete("/errors/resolved", async (_req: Request, res: Response) => {
+adminRoutes.delete("/admin/errors/resolved", async (c) => {
   try {
-    const result = await db.delete(errorLogs).where(eq(errorLogs.resolved, true));
-    res.json({ success: true, deleted: result.changes || 0 });
+    const db = getDb(c);
+    const deleted = await db.delete(errorLogs).where(eq(errorLogs.resolved, true)).returning();
+    return c.json({ success: true, deleted: deleted.length || 0 });
   } catch (err) {
-    logger.error({ err }, "Admin clear resolved errors failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to clear resolved errors" } });
+    return serverError(c, "Failed to clear resolved errors");
   }
 });
 
-router.get("/feedback", async (req: Request, res: Response) => {
+adminRoutes.get("/admin/feedback", async (c) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
-    const type = req.query.type as string | undefined;
+    const db = getDb(c);
+    const limit = Math.min(parseInt(c.req.query("limit") || "") || 50, 200);
+    const offset = parseInt(c.req.query("offset") || "") || 0;
+    const type = c.req.query("type");
 
     const conditions = type ? eq(feedback.type, type) : undefined;
 
@@ -163,26 +161,22 @@ router.get("/feedback", async (req: Request, res: Response) => {
 
     const [count] = await db.select({ count: sql<number>`count(*)` }).from(feedback).where(conditions);
 
-    res.json({ items, total: count?.count || 0, limit, offset });
+    return c.json({ items, total: count?.count || 0, limit, offset });
   } catch (err) {
-    logger.error({ err }, "Admin list feedback failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list feedback" } });
+    return serverError(c, "Failed to list feedback");
   }
 });
 
-router.delete("/feedback/:id", async (req: Request, res: Response) => {
+adminRoutes.delete("/admin/feedback/:id", async (c) => {
   try {
-    const feedbackId = parseInt(req.params.id, 10);
+    const db = getDb(c);
+    const feedbackId = parseInt(c.req.param("id") || "", 10);
     if (isNaN(feedbackId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
     }
     await db.delete(feedback).where(eq(feedback.id, feedbackId));
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
-    logger.error({ err }, "Admin delete feedback failed");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete feedback" } });
+    return serverError(c, "Failed to delete feedback");
   }
 });
-
-export default router;

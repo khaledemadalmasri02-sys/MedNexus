@@ -1,83 +1,47 @@
-import { Router, Request, Response } from "express";
-import { db, cardProgress, cards, decks } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, and, isNull, sql, inArray, lte } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import { validateBody } from "../middleware/validate.js";
-import { reviewCardSchema } from "./validators.js";
+import { z } from "zod";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { cardProgress, cards, decks } from "../db/index";
+import { validate } from "../middleware/validate";
+import { logger } from "../lib/logger";
+import { sm2Update } from "../lib/sm2";
 
-const router = Router();
+export const cardProgressRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+function getDb(c: any): DB { return c.get("db"); }
+function getUserId(c: any): string | null { return c.get("user")?.id ?? null; }
 
 function ownerFilter(userId: string | null) {
   return userId ? eq(cardProgress.userId, userId) : isNull(cardProgress.userId);
 }
 
-// ── SM-2 Algorithm ──
-// quality: 0=complete blackout, 1=incorrect but remembered on seeing answer,
-//          2=incorrect but answer seemed easy to recall,
-//          3=correct with serious difficulty, 4=correct with some hesitation,
-//          5=perfect response
-function sm2Update(
-  prev: { easeFactor: number; intervalDays: number; repetitions: number },
-  quality: number,
-): { easeFactor: number; intervalDays: number; repetitions: number; nextReviewDate: string } {
-  let { easeFactor, intervalDays, repetitions } = prev;
+const reviewCardSchema = z.object({
+  quality: z.number().int().min(0).max(5),
+});
 
-  // Update ease factor
-  easeFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
-
-  if (quality >= 3) {
-    // Correct response
-    repetitions += 1;
-    if (repetitions === 1) {
-      intervalDays = 1;
-    } else if (repetitions === 2) {
-      intervalDays = 6;
-    } else {
-      intervalDays = Math.round(intervalDays * easeFactor);
-    }
-  } else {
-    // Incorrect — relearn
-    repetitions = 0;
-    intervalDays = 0;
-  }
-
-  const nextDate = new Date();
-  nextDate.setDate(nextDate.getDate() + intervalDays);
-  const nextReviewDate = nextDate.toISOString().split("T")[0];
-
-  return { easeFactor, intervalDays, repetitions, nextReviewDate };
-}
-
-// ── POST /api/cards/:id/review — submit a review for a card ──
-router.post("/cards/:id/review", validateBody(reviewCardSchema), async (req: Request, res: Response) => {
+// ── POST /api/cards/:id/review ──
+cardProgressRoutes.post("/cards/:id/review", validate(reviewCardSchema), async (c) => {
   try {
-    const cardId = parseInt(req.params.id, 10);
+    const cardId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(cardId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid card ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid card ID" } }, 400);
     }
 
-    const { quality } = req.body;
+    const { quality } = c.get("validated") as any;
     if (typeof quality !== "number" || quality < 0 || quality > 5) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Quality must be 0-5" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Quality must be 0-5" } }, 400);
     }
 
-    const userId = getUserId(req);
+    const userId = getUserId(c);
 
-    // Verify card exists
-    const card = await db.query.cards.findFirst({ where: eq(cards.id, cardId) });
+    const card = await getDb(c).query.cards.findFirst({ where: eq(cards.id, cardId) });
     if (!card) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Card not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Card not found" } }, 404);
     }
 
-    // Get or create progress record
-    let progress = await db.query.cardProgress.findFirst({
+    let progress = await getDb(c).query.cardProgress.findFirst({
       where: and(eq(cardProgress.cardId, cardId), ownerFilter(userId)),
     });
 
@@ -85,7 +49,7 @@ router.post("/cards/:id/review", validateBody(reviewCardSchema), async (req: Req
 
     if (!progress) {
       const sm2 = sm2Update({ easeFactor: 2.5, intervalDays: 0, repetitions: 0 }, quality);
-      const [created] = await db.insert(cardProgress).values({
+      const [created] = await getDb(c).insert(cardProgress).values({
         cardId,
         userId: userId || null,
         easeFactor: sm2.easeFactor,
@@ -100,14 +64,13 @@ router.post("/cards/:id/review", validateBody(reviewCardSchema), async (req: Req
         updatedAt: now,
       }).returning();
 
-      res.json({
+      return c.json({
         nextReviewDate: created.nextReviewDate,
         intervalDays: created.intervalDays,
         easeFactor: created.easeFactor,
         repetitions: created.repetitions,
         newMasteryPct: quality >= 3 ? 20 : 0,
       });
-      return;
     }
 
     const sm2 = sm2Update(
@@ -115,7 +78,7 @@ router.post("/cards/:id/review", validateBody(reviewCardSchema), async (req: Req
       quality,
     );
 
-    const [updated] = await db.update(cardProgress).set({
+    const [updated] = await getDb(c).update(cardProgress).set({
       easeFactor: sm2.easeFactor,
       intervalDays: sm2.intervalDays,
       repetitions: sm2.repetitions,
@@ -127,13 +90,12 @@ router.post("/cards/:id/review", validateBody(reviewCardSchema), async (req: Req
       updatedAt: now,
     }).where(eq(cardProgress.cardId, cardId)).returning();
 
-    // Calculate mastery: ratio of known to total, weighted by repetitions
     const totalReviews = (updated.knownCount || 0) + (updated.unknownCount || 0);
     const newMasteryPct = totalReviews > 0
       ? Math.min(100, Math.round(((updated.knownCount || 0) / totalReviews) * 100 * Math.min(1, (updated.repetitions || 0) / 5)))
       : 0;
 
-    res.json({
+    return c.json({
       nextReviewDate: updated.nextReviewDate,
       intervalDays: updated.intervalDays,
       easeFactor: updated.easeFactor,
@@ -142,42 +104,36 @@ router.post("/cards/:id/review", validateBody(reviewCardSchema), async (req: Req
     });
   } catch (err) {
     logger.error({ err }, "Failed to record card review");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to record review" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to record review" } }, 500);
   }
 });
 
-// ── GET /api/decks/:id/review-queue — cards due for review ──
-router.get("/decks/:id/review-queue", async (req: Request, res: Response) => {
+// ── GET /api/decks/:id/review-queue ──
+cardProgressRoutes.get("/decks/:id/review-queue", async (c) => {
   try {
-    const deckId = parseInt(req.params.id, 10);
+    const deckId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(deckId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } }, 400);
     }
 
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     const today = new Date().toISOString().split("T")[0];
 
-    // Get all card IDs in this deck (including sub-decks)
-    const allDecks = await db.query.decks.findMany();
+    const allDecks = await getDb(c).query.decks.findMany();
     function collectDescendantIds(parentId: number): number[] {
-      const children = allDecks.filter(d => d.parentId === parentId);
-      return [...children.map(d => d.id), ...children.flatMap(c => collectDescendantIds(c.id))];
+      const children = allDecks.filter((d) => d.parentId === parentId);
+      return [...children.map((d) => d.id), ...children.flatMap((ch) => collectDescendantIds(ch.id))];
     }
     const allDeckIds = [deckId, ...collectDescendantIds(deckId)];
 
-    const deckCards = await db.query.cards.findMany({
-      where: inArray(cards.deckId, allDeckIds),
-    });
-    const cardIds = deckCards.map(c => c.id);
+    const deckCards = await getDb(c).query.cards.findMany({ where: inArray(cards.deckId, allDeckIds) });
+    const cardIds = deckCards.map((cd) => cd.id);
 
     if (cardIds.length === 0) {
-      res.json({ cards: [], total: 0 });
-      return;
+      return c.json({ cards: [], total: 0 });
     }
 
-    // Get progress records for cards that are due
-    const dueProgress = await db.query.cardProgress.findMany({
+    const dueProgress = await getDb(c).query.cardProgress.findMany({
       where: and(
         inArray(cardProgress.cardId, cardIds),
         lte(cardProgress.nextReviewDate, today),
@@ -185,30 +141,28 @@ router.get("/decks/:id/review-queue", async (req: Request, res: Response) => {
       ),
     });
 
-    const dueCardIds = new Set(dueProgress.map(p => p.cardId));
+    const dueCardIds = new Set(dueProgress.map((p) => p.cardId));
     const dueCards = deckCards
-      .filter(c => dueCardIds.has(c.id))
-      .map(c => ({
-        ...c,
-        progress: dueProgress.find(p => p.cardId === c.id),
+      .filter((cd) => dueCardIds.has(cd.id))
+      .map((cd) => ({
+        ...cd,
+        progress: dueProgress.find((p) => p.cardId === cd.id),
       }))
       .sort((a, b) => {
-        // Sort by urgency: lowest interval first, then oldest review date
         const aInterval = a.progress?.intervalDays ?? 0;
         const bInterval = b.progress?.intervalDays ?? 0;
         return aInterval - bInterval;
       });
 
-    // Also include cards with no progress record (new cards, never studied)
-    const studiedCardIds = new Set((await db.query.cardProgress.findMany({
+    const studiedCardIds = new Set((await getDb(c).query.cardProgress.findMany({
       where: and(inArray(cardProgress.cardId, cardIds), ownerFilter(userId)),
-    })).map(p => p.cardId));
+    })).map((p) => p.cardId));
 
     const newCards = deckCards
-      .filter(c => !studiedCardIds.has(c.id))
-      .map(c => ({ ...c, progress: null }));
+      .filter((cd) => !studiedCardIds.has(cd.id))
+      .map((cd) => ({ ...cd, progress: null }));
 
-    res.json({
+    return c.json({
       cards: [...dueCards, ...newCards],
       total: dueCards.length + newCards.length,
       dueCount: dueCards.length,
@@ -216,45 +170,41 @@ router.get("/decks/:id/review-queue", async (req: Request, res: Response) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to get review queue");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get review queue" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get review queue" } }, 500);
   }
 });
 
-// ── GET /api/decks/:id/progress — aggregated deck progress ──
-router.get("/decks/:id/progress", async (req: Request, res: Response) => {
+// ── GET /api/decks/:id/progress ──
+cardProgressRoutes.get("/decks/:id/progress", async (c) => {
   try {
-    const deckId = parseInt(req.params.id, 10);
+    const deckId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(deckId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } }, 400);
     }
 
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     const today = new Date().toISOString().split("T")[0];
 
-    const allDecks = await db.query.decks.findMany();
+    const allDecks = await getDb(c).query.decks.findMany();
     function collectDescendantIds(parentId: number): number[] {
-      const children = allDecks.filter(d => d.parentId === parentId);
-      return [...children.map(d => d.id), ...children.flatMap(c => collectDescendantIds(c.id))];
+      const children = allDecks.filter((d) => d.parentId === parentId);
+      return [...children.map((d) => d.id), ...children.flatMap((ch) => collectDescendantIds(ch.id))];
     }
     const allDeckIds = [deckId, ...collectDescendantIds(deckId)];
 
-    const deckCards = await db.query.cards.findMany({
-      where: inArray(cards.deckId, allDeckIds),
-    });
+    const deckCards = await getDb(c).query.cards.findMany({ where: inArray(cards.deckId, allDeckIds) });
     const total = deckCards.length;
 
     if (total === 0) {
-      res.json({ total: 0, dueToday: 0, mastered: 0, learning: 0, new: 0, masteryPct: 0 });
-      return;
+      return c.json({ total: 0, dueToday: 0, mastered: 0, learning: 0, new: 0, masteryPct: 0 });
     }
 
-    const cardIds = deckCards.map(c => c.id);
-    const progressRecords = await db.query.cardProgress.findMany({
+    const cardIds = deckCards.map((cd) => cd.id);
+    const progressRecords = await getDb(c).query.cardProgress.findMany({
       where: and(inArray(cardProgress.cardId, cardIds), ownerFilter(userId)),
     });
 
-    const progressMap = new Map(progressRecords.map(p => [p.cardId, p]));
+    const progressMap = new Map(progressRecords.map((p) => [p.cardId, p]));
 
     let dueToday = 0;
     let mastered = 0;
@@ -289,31 +239,29 @@ router.get("/decks/:id/progress", async (req: Request, res: Response) => {
     const studiedCount = total - newCount;
     const masteryPct = studiedCount > 0 ? Math.round(totalMastery / total) : 0;
 
-    res.json({ total, dueToday, mastered, learning, new: newCount, masteryPct });
+    return c.json({ total, dueToday, mastered, learning, new: newCount, masteryPct });
   } catch (err) {
     logger.error({ err }, "Failed to get deck progress");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get deck progress" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get deck progress" } }, 500);
   }
 });
 
-// ── GET /api/review/due-count — global due count for navbar ──
-router.get("/review/due-count", async (req: Request, res: Response) => {
+// ── GET /api/review/due-count ──
+cardProgressRoutes.get("/review/due-count", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     const today = new Date().toISOString().split("T")[0];
 
-    const dueRecords = await db.query.cardProgress.findMany({
+    const dueRecords = await getDb(c).query.cardProgress.findMany({
       where: and(
         lte(cardProgress.nextReviewDate, today),
         ownerFilter(userId),
       ),
     });
 
-    res.json({ count: dueRecords.length });
+    return c.json({ count: dueRecords.length });
   } catch (err) {
     logger.error({ err }, "Failed to get due count");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get due count" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get due count" } }, 500);
   }
 });
-
-export default router;

@@ -1,35 +1,39 @@
-import { Router, Request, Response } from "express";
-import { db, notifications } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, and, isNull, or, lte, sql } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import { validateBody } from "../middleware/validate.js";
-import { createNotificationSchema } from "./validators.js";
+import { z } from "zod";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { notifications } from "../db/index";
+import { validate } from "../middleware/validate";
+import { logger } from "../lib/logger";
 
-const router = Router();
+export const notificationRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+function getDb(c: any): DB { return c.get("db"); }
+function getUserId(c: any): string | null { return c.get("user")?.id ?? null; }
+
+const createNotificationSchema = z.object({
+  type: z.string().min(1).max(50),
+  title: z.string().min(1).max(200),
+  message: z.string().min(1).max(5000),
+  actionUrl: z.string().url().max(500).optional(),
+});
 
 // ── GET /api/notifications ──
-router.get("/", async (req: Request, res: Response) => {
+notificationRoutes.get("/notifications", async (c) => {
   try {
-    const userId = getUserId(req);
-    const unreadOnly = req.query.unread === 'true';
+    const userId = getUserId(c);
+    const unreadOnly = c.req.query("unread") === "true";
 
     const conditions = [userId ? eq(notifications.userId, userId) : isNull(notifications.userId)];
-    // Scheduled reminders are hidden until their delivery time arrives.
     conditions.push(or(isNull(notifications.scheduledAt), lte(notifications.scheduledAt, new Date()))!);
     if (unreadOnly) {
       conditions.push(eq(notifications.read, false));
     }
 
-    const notifs = await db.query.notifications.findMany({
-      where: and(...conditions),
-      limit: 50,
-    });
+    const notifs = await getDb(c).query.notifications.findMany({ where: and(...conditions), limit: 50 });
 
-    const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(notifications).where(
+    const [countResult] = await getDb(c).select({ count: sql<number>`count(*)` }).from(notifications).where(
       and(
         userId ? eq(notifications.userId, userId) : isNull(notifications.userId),
         or(isNull(notifications.scheduledAt), lte(notifications.scheduledAt, new Date()))!,
@@ -37,63 +41,60 @@ router.get("/", async (req: Request, res: Response) => {
       ),
     );
 
-    res.json({ notifications: notifs, unreadCount: countResult?.count || 0 });
+    return c.json({ notifications: notifs, unreadCount: countResult?.count || 0 });
   } catch (err) {
     logger.error({ err }, "Failed to get notifications");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get notifications" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get notifications" } }, 500);
   }
 });
 
 // ── POST /api/notifications/:id/read ──
-router.post("/:id/read", async (req: Request, res: Response) => {
+notificationRoutes.post("/notifications/:id/read", async (c) => {
   try {
-    const userId = getUserId(req);
-    const notifId = parseInt(req.params.id, 10);
+    const userId = getUserId(c);
+    const notifId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(notifId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
     }
 
-    const existing = await db.query.notifications.findFirst({ where: eq(notifications.id, notifId) });
+    const existing = await getDb(c).query.notifications.findFirst({ where: eq(notifications.id, notifId) });
     if (!existing || (userId && existing.userId !== userId) || (!userId && existing.userId !== null)) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Notification not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Notification not found" } }, 404);
     }
 
-    await db.update(notifications).set({ read: true }).where(eq(notifications.id, notifId));
-    res.status(204).send();
+    await getDb(c).update(notifications).set({ read: true }).where(eq(notifications.id, notifId));
+    return new Response(null, { status: 204 });
   } catch (err) {
     logger.error({ err }, "Failed to mark notification read");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to mark notification read" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to mark notification read" } }, 500);
   }
 });
 
 // ── POST /api/notifications/read-all ──
-router.post("/read-all", async (req: Request, res: Response) => {
+notificationRoutes.post("/notifications/read-all", async (c) => {
   try {
-    const userId = getUserId(req);
-    await db.update(notifications).set({ read: true }).where(
+    const userId = getUserId(c);
+    await getDb(c).update(notifications).set({ read: true }).where(
       userId ? eq(notifications.userId, userId) : isNull(notifications.userId),
     );
-    res.status(204).send();
+    return new Response(null, { status: 204 });
   } catch (err) {
     logger.error({ err }, "Failed to mark all notifications read");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to mark all notifications read" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to mark all notifications read" } }, 500);
   }
 });
 
-// ── POST /api/notifications — create (internal use) ──
-router.post("/", validateBody(createNotificationSchema), async (req: Request, res: Response) => {
+// ── POST /api/notifications ──
+notificationRoutes.post("/notifications", validate(createNotificationSchema), async (c) => {
   try {
-    const userId = getUserId(req);
-    const { type, title, message, actionUrl } = req.body;
+    const userId = getUserId(c);
+    const { type, title, message, actionUrl } = c.get("validated") as any;
 
     if (!type || !title || !message) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "type, title, and message are required" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "type, title, and message are required" } }, 400);
     }
 
-    const [notif] = await db.insert(notifications).values({
+    const [notif] = await getDb(c).insert(notifications).values({
       userId,
       type,
       title,
@@ -103,11 +104,9 @@ router.post("/", validateBody(createNotificationSchema), async (req: Request, re
       createdAt: new Date(),
     }).returning();
 
-    res.status(201).json(notif);
+    return c.json(notif, 201);
   } catch (err) {
     logger.error({ err }, "Failed to create notification");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to create notification" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to create notification" } }, 500);
   }
 });
-
-export default router;

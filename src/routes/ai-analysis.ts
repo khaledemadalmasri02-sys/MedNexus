@@ -1,18 +1,11 @@
-import { Router, Request, Response } from "express";
-import { db, cards, decks } from "../db/index.js";
-import { eq, inArray } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import { AIService } from "../lib/ai.js";
+import { Hono } from "hono";
+import { eq } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import { cards, decks } from "../db/index";
+import { getDb, errorJson, notFound } from "../lib/helpers";
+import { createAIService } from "../lib/ai";
 
-const router = Router();
-
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
-
-// In-memory cache for analysis results (keyed by deckId)
-const analysisCache = new Map<number, { results: CardAnalysis[]; timestamp: number }>();
-const CACHE_TTL = 3600000; // 1 hour
+export const aiAnalysisRoutes = new Hono<AppEnv>();
 
 interface CardAnalysis {
   cardId: number;
@@ -22,40 +15,40 @@ interface CardAnalysis {
   duplicateOf?: number;
 }
 
-// ── POST /api/decks/:id/analyze — AI card quality analysis ──
-router.post("/decks/:id/analyze", async (req: Request, res: Response) => {
-  const deckId = parseInt(req.params.id, 10);
+// In-memory cache for analysis results (keyed by deckId). Best-effort: does not
+// persist across Worker isolates/cold starts, matching the original in-memory design.
+const analysisCache = new Map<number, { results: CardAnalysis[]; timestamp: number }>();
+const CACHE_TTL = 3600000; // 1 hour
+
+// ── POST /api/decks/:id/analyze ──
+aiAnalysisRoutes.post("/decks/:id/analyze", async (c) => {
+  const deckId = parseInt(c.req.param("id") ?? "", 10);
   if (isNaN(deckId)) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } });
-    return;
+    return errorJson(c, 400, "VALIDATION_ERROR", "Invalid deck ID");
   }
 
   try {
-    const deckCards = await db.query.cards.findMany({
-      where: eq(cards.deckId, deckId),
-    });
+    const deckCards = await getDb(c).query.cards.findMany({ where: eq(cards.deckId, deckId) });
 
     if (deckCards.length === 0) {
-      res.json({ analyses: [], message: "No cards to analyze" });
-      return;
+      return c.json({ analyses: [], message: "No cards to analyze" });
     }
 
-    // Check cache
     const cached = analysisCache.get(deckId);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      res.json({ analyses: cached.results, cached: true });
-      return;
+      return c.json({ analyses: cached.results, cached: true });
     }
 
-    const aiService = new AIService();
+    const ai = createAIService(c.env);
 
-    // Build prompt for batch analysis
-    const cardsList = deckCards.map((c, i) => {
-      const choices = c.choices ? `\nChoices: ${c.choices}` : "";
-    return `Card ${i + 1}:
-Front: ${c.front}
-Back: ${c.back}${choices}`;
-    }).join("\n\n");
+    const cardsList = deckCards
+      .map((card, i) => {
+        const choices = card.choices ? `\nChoices: ${card.choices}` : "";
+        return `Card ${i + 1}:
+Front: ${card.front}
+Back: ${card.back}${choices}`;
+      })
+      .join("\n\n");
 
     const prompt = `Analyze these flashcards for quality. For each card, evaluate:
 1. Clarity of the question (is it specific and unambiguous?)
@@ -78,64 +71,57 @@ ${cardsList}
 
 Return ONLY the JSON array, no other text.`;
 
-    const analysisText = await aiService.complete(
-      [{ role: "user" as const, content: prompt }],
-      { maxTokens: 4000 }
-    );
+    const analysisText = await ai.complete([{ role: "user", content: prompt }], { maxTokens: 4000 });
 
-    // Parse the JSON response
     let analyses: CardAnalysis[] = [];
     try {
       const jsonMatch = analysisText.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        analyses = parsed.map((item: { cardIndex: number; score: number; issues: string[]; suggestion: string; duplicateOf?: number }) => ({
-          cardId: deckCards[item.cardIndex]?.id || 0,
-          score: Math.min(10, Math.max(1, item.score || 5)),
-          issues: Array.isArray(item.issues) ? item.issues : [],
-          suggestion: item.suggestion || "",
-          duplicateOf: item.duplicateOf !== null && item.duplicateOf !== undefined
-            ? deckCards[item.duplicateOf]?.id || undefined
-            : undefined,
-        }));
+        analyses = parsed.map(
+          (item: { cardIndex: number; score: number; issues: string[]; suggestion: string; duplicateOf?: number }) => ({
+            cardId: deckCards[item.cardIndex]?.id || 0,
+            score: Math.min(10, Math.max(1, item.score || 5)),
+            issues: Array.isArray(item.issues) ? item.issues : [],
+            suggestion: item.suggestion || "",
+            duplicateOf:
+              item.duplicateOf !== null && item.duplicateOf !== undefined
+                ? deckCards[item.duplicateOf]?.id || undefined
+                : undefined,
+          })
+        );
       }
     } catch (parseErr) {
-      logger.warn({ err: parseErr, text: analysisText.slice(0, 200) }, "Failed to parse AI analysis response");
-      // Fallback: return basic scores
-      analyses = deckCards.map(c => ({
-        cardId: c.id,
+      analyses = deckCards.map((card) => ({
+        cardId: card.id,
         score: 5,
         issues: ["AI analysis could not be parsed"],
         suggestion: "Try analyzing again",
       }));
     }
 
-    // Cache results
     analysisCache.set(deckId, { results: analyses, timestamp: Date.now() });
 
-    res.json({ analyses, cached: false });
+    return c.json({ analyses, cached: false });
   } catch (err) {
-    logger.error({ err }, "Failed to analyze deck");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to analyze deck" } });
+    return errorJson(c, 500, "INTERNAL_ERROR", "Failed to analyze deck");
   }
 });
 
-// ── POST /api/cards/:id/improve — AI-improved version of a card ──
-router.post("/cards/:id/improve", async (req: Request, res: Response) => {
-  const cardId = parseInt(req.params.id, 10);
+// ── POST /api/cards/:id/improve ──
+aiAnalysisRoutes.post("/cards/:id/improve", async (c) => {
+  const cardId = parseInt(c.req.param("id") ?? "", 10);
   if (isNaN(cardId)) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid card ID" } });
-    return;
+    return errorJson(c, 400, "VALIDATION_ERROR", "Invalid card ID");
   }
 
   try {
-    const card = await db.query.cards.findFirst({ where: eq(cards.id, cardId) });
+    const card = await getDb(c).query.cards.findFirst({ where: eq(cards.id, cardId) });
     if (!card) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Card not found" } });
-      return;
+      return notFound(c, "Card not found");
     }
 
-    const aiService = new AIService();
+    const ai = createAIService(c.env);
 
     const prompt = `Improve this medical flashcard. Make the front more specific as a clinical vignette question. Ensure the back has a clear, concise answer with key points.
 
@@ -146,63 +132,50 @@ Return JSON: { "front": "improved question", "back": "improved answer", "explana
 
 Return ONLY the JSON, no other text.`;
 
-    const result = await aiService.complete(
-      [{ role: "user" as const, content: prompt }],
-      { maxTokens: 1000 }
-    );
+    const result = await ai.complete([{ role: "user", content: prompt }], { maxTokens: 1000 });
 
     try {
       const jsonMatch = result.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        res.json({
+        return c.json({
           front: parsed.front || card.front,
           back: parsed.back || card.back,
           explanation: parsed.explanation || "",
         });
-      } else {
-        res.json({ front: card.front, back: card.back, explanation: "AI did not return valid JSON" });
       }
+      return c.json({ front: card.front, back: card.back, explanation: "AI did not return valid JSON" });
     } catch {
-      res.json({ front: card.front, back: card.back, explanation: "Failed to parse AI response" });
+      return c.json({ front: card.front, back: card.back, explanation: "Failed to parse AI response" });
     }
   } catch (err) {
-    logger.error({ err }, "Failed to improve card");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to improve card" } });
+    return errorJson(c, 500, "INTERNAL_ERROR", "Failed to improve card");
   }
 });
 
-// ── POST /api/decks/:id/insights — AI deck-level insights ──
-router.post("/decks/:id/insights", async (req: Request, res: Response) => {
-  const deckId = parseInt(req.params.id, 10);
+// ── POST /api/decks/:id/insights ──
+aiAnalysisRoutes.post("/decks/:id/insights", async (c) => {
+  const deckId = parseInt(c.req.param("id") ?? "", 10);
   if (isNaN(deckId)) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } });
-    return;
+    return errorJson(c, 400, "VALIDATION_ERROR", "Invalid deck ID");
   }
 
   try {
-    const deck = await db.query.decks.findFirst({ where: eq(decks.id, deckId) });
+    const deck = await getDb(c).query.decks.findFirst({ where: eq(decks.id, deckId) });
     if (!deck) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Deck not found" } });
-      return;
+      return notFound(c, "Deck not found");
     }
 
-    const deckCards = await db.query.cards.findMany({
-      where: eq(cards.deckId, deckId),
-    });
+    const deckCards = await getDb(c).query.cards.findMany({ where: eq(cards.deckId, deckId) });
 
     if (deckCards.length === 0) {
-      res.json({ insights: null, message: "No cards to analyze" });
-      return;
+      return c.json({ insights: null, message: "No cards to analyze" });
     }
 
-    const aiService = new AIService();
+    const ai = createAIService(c.env);
 
-    // Sample up to 30 cards for the prompt
     const sampleCards = deckCards.slice(0, 30);
-    const cardsList = sampleCards.map((c, i) =>
-      `${i + 1}. Q: ${c.front}\n   A: ${c.back}`
-    ).join("\n");
+    const cardsList = sampleCards.map((card, i) => `${i + 1}. Q: ${card.front}\n   A: ${card.back}`).join("\n");
 
     const prompt = `Analyze this medical flashcard deck and provide insights.
 
@@ -225,26 +198,19 @@ Provide a JSON response with:
 
 Return ONLY the JSON, no other text.`;
 
-    const result = await aiService.complete(
-      [{ role: "user" as const, content: prompt }],
-      { maxTokens: 3000 }
-    );
+    const result = await ai.complete([{ role: "user", content: prompt }], { maxTokens: 3000 });
 
     try {
       const jsonMatch = result.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        res.json({ insights: parsed });
-      } else {
-        res.json({ insights: null, message: "AI did not return valid JSON" });
+        return c.json({ insights: parsed });
       }
+      return c.json({ insights: null, message: "AI did not return valid JSON" });
     } catch {
-      res.json({ insights: null, message: "Failed to parse AI response" });
+      return c.json({ insights: null, message: "Failed to parse AI response" });
     }
   } catch (err) {
-    logger.error({ err }, "Failed to get deck insights");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get insights" } });
+    return errorJson(c, 500, "INTERNAL_ERROR", "Failed to get insights");
   }
 });
-
-export default router;

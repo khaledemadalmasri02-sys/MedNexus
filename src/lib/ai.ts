@@ -1,16 +1,6 @@
-import { getConfig } from "../config.js";
-import { logger } from "./logger.js";
-import { errorLearningService } from "./error-learning.js";
-import http from "http";
-import https from "https";
-
-// Connection pooling agents — reuse TCP connections across requests
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 20 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 20 });
-
-function getAgent(url: string): http.Agent | https.Agent {
-  return url.startsWith("https") ? httpsAgent : httpAgent;
-}
+import { getConfig, type AppConfig } from "./config";
+import { logger } from "./logger";
+import type { Bindings } from "../types";
 
 export interface Message {
   role: "system" | "user" | "assistant";
@@ -21,7 +11,13 @@ export interface GenerateOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
-  stream?: boolean;
+  // Max chunks generated in parallel. Bounds load on the AI provider.
+  concurrency?: number;
+  // Overall wall-clock budget (ms). When exceeded, in-flight calls abort and
+  // a PartialGenerationError is thrown carrying whatever was produced so far.
+  deadlineMs?: number;
+  // External abort signal (e.g. a per-request deadline).
+  signal?: AbortSignal;
 }
 
 export interface GeneratedCard {
@@ -38,345 +34,383 @@ export interface GeneratedQuestion {
   explanation?: string;
 }
 
-// Parse model string to provider/model format
 function parseModel(model: string): { provider: string; modelName: string } {
   const parts = model.split("/");
-  if (parts.length >= 2) {
-    return { provider: parts[0], modelName: parts.slice(1).join("/") };
-  }
+  if (parts.length >= 2) return { provider: parts[0], modelName: parts.slice(1).join("/") };
   return { provider: "openrouter", modelName: model };
 }
 
-// Get API key for the model's provider
-function getApiKey(model: string): string | undefined {
-  const config = getConfig();
+// Local LM Studio / Ollama-compatible servers (OpenAI-style /v1 API) don't need
+// a key and use a self-hosted base URL.
+function isLocalProvider(provider: string): boolean {
+  return provider === "local" || provider === "lmstudio" || provider === "ollama";
+}
+
+function getApiKey(model: string, config: AppConfig): string | undefined {
   const { provider } = parseModel(model);
-  
+  if (isLocalProvider(provider)) return undefined;
   switch (provider) {
-    case "openrouter":
-      return config.OPENROUTER_API_KEY;
-    case "openai":
-      return config.OPENAI_API_KEY;
-    case "groq":
-      return config.GROQ_API_KEY;
-    case "mistral":
-      return config.MISTRAL_API_KEY;
-    case "google":
-      return config.GOOGLE_AI_API_KEY;
+    case "openrouter": return config.OPENROUTER_API_KEY;
+    case "openai": return config.OPENAI_API_KEY;
+    case "groq": return config.GROQ_API_KEY;
+    case "mistral": return config.MISTRAL_API_KEY;
+    case "google": return config.GOOGLE_AI_API_KEY;
     case "nvidia":
-    case "cohere":
-      return config.OPENROUTER_API_KEY; // These use OpenRouter gateway
-    default:
-      return config.OPENROUTER_API_KEY; // Default to OpenRouter
+    case "cohere": return config.OPENROUTER_API_KEY;
+    default: return config.OPENROUTER_API_KEY;
   }
 }
 
-// Get the API base URL for the provider
-function getApiBaseUrl(model: string): string {
+function getApiBaseUrl(model: string, config: AppConfig): string {
   const { provider } = parseModel(model);
-  
   switch (provider) {
+    case "local":
+    case "lmstudio":
+    case "ollama": {
+      const base = (config.LOCAL_AI_URL || "http://192.168.100.99:1234/v1").replace(/\/+$/, "");
+      return base.startsWith("http") ? base : `http://${base}`;
+    }
     case "openrouter":
     case "nvidia":
-    case "cohere":
-      return "https://openrouter.ai/api/v1";
-    case "openai":
-      return "https://api.openai.com/v1";
-    case "groq":
-      return "https://api.groq.com/openai/v1";
-    case "mistral":
-      return "https://api.mistral.ai/v1";
-    case "google":
-      return "https://generativelanguage.googleapis.com/v1beta";
-    default:
-      return "https://openrouter.ai/api/v1";
+    case "cohere": return "https://openrouter.ai/api/v1";
+    case "openai": return "https://api.openai.com/v1";
+    case "groq": return "https://api.groq.com/openai/v1";
+    case "mistral": return "https://api.mistral.ai/v1";
+    case "google": return "https://generativelanguage.googleapis.com/v1beta";
+    default: return "https://openrouter.ai/api/v1";
   }
 }
 
-// Get the full model name for API call
 function getFullModelName(model: string): string {
   const { provider, modelName } = parseModel(model);
-  
-  if (provider === "openrouter") {
-    return modelName;
-  }
+  // For OpenAI-compatible servers (local/lmstudio/ollama) the provider prefix
+  // must be stripped so the real model id reaches the server.
+  if (provider === "openrouter" || isLocalProvider(provider)) return modelName;
   return model;
 }
 
 const MAX_RETRIES = 3;
 const BASE_RETRY_DELAY_MS = 1000;
 const AI_TIMEOUT_MS = 60_000;
-const CIRCUIT_BREAK_THRESHOLD = 3;
-const CIRCUIT_BREAK_RESET_MS = 60_000;
 
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-const circuitBreakers = new Map<string, { failures: number; lastFailure: number; open: boolean }>();
-
-function getCircuitBreaker(provider: string): { failures: number; lastFailure: number; open: boolean } {
-  let cb = circuitBreakers.get(provider);
-  if (!cb) {
-    cb = { failures: 0, lastFailure: 0, open: false };
-    circuitBreakers.set(provider, cb);
-  }
-  return cb;
+// For local/self-hosted OpenAI-style servers (LM Studio, Ollama, or a tunnel
+// exposing one), a 5xx / bad-gateway means the server (or tunnel) is simply
+// DOWN — retrying is pointless and just adds seconds of latency before the
+// caller's offline fallback. Network-level failures (fetch failed, ECONNREFUSED,
+// bad gateway) are likewise non-retryable for local endpoints.
+function isLocalProviderDown(status: number | null, err: unknown, provider: string): boolean {
+  if (!isLocalProvider(provider)) return false;
+  if (status !== null && (status === 502 || status === 503 || status === 504)) return true;
+  const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+  return /fetch failed|econnrefused|bad gateway|502|503|504|enotfound|network/i.test(msg);
 }
 
-function isCircuitOpen(provider: string): boolean {
-  const cb = getCircuitBreaker(provider);
-  if (!cb.open) return false;
-  if (Date.now() - cb.lastFailure > CIRCUIT_BREAK_RESET_MS) {
-    cb.open = false;
-    cb.failures = 0;
-    return false;
-  }
-  return true;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Run `worker` over `items` with a bounded number of concurrent executions.
+// Remaining work is skipped once `externalAbort` fires. A single non-abort
+// error rejects the whole pool; abort errors are swallowed (item skipped).
+async function runPool<T, R>(
+  items: T[],
+  worker: (item: T, index: number) => Promise<R>,
+  concurrency: number,
+  externalAbort?: AbortSignal,
+): Promise<R[]> {
+  const results: (R | undefined)[] = new Array(items.length);
+  let cursor = 0;
+  const exec = async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      if (externalAbort?.aborted) return;
+      try {
+        results[i] = await worker(items[i], i);
+      } catch (err) {
+        if ((err as any)?.name === "AbortError") {
+          results[i] = undefined;
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  const pool = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, () => exec());
+  await Promise.all(pool);
+  return results.filter((r): r is R => r !== undefined);
 }
 
-function recordCircuitSuccess(provider: string): void {
-  const cb = getCircuitBreaker(provider);
-  cb.failures = 0;
-  cb.open = false;
+// Thrown when the overall deadline is exceeded but some items were already
+// produced. Carries those items so the caller can persist a partial result
+// instead of discarding all work.
+export class PartialGenerationError extends Error {
+  items: any[];
+  constructor(items: any[], message = "Generation timed out before all items were produced") {
+    super(message);
+    this.name = "PartialGenerationError";
+    this.items = items;
+  }
 }
 
-function recordCircuitFailure(provider: string): void {
-  const cb = getCircuitBreaker(provider);
-  cb.failures++;
-  cb.lastFailure = Date.now();
-  if (cb.failures >= CIRCUIT_BREAK_THRESHOLD) {
-    cb.open = true;
-    logger.warn({ provider, failures: cb.failures }, "Circuit breaker opened for AI provider");
+// ── Robust JSON-array extraction for AI outputs ──
+// Models frequently return fenced JSON (```json ... ```), a wrapped object
+// ({"cards":[...]}), or trailing commas. This parses all of those safely.
+
+function stripCodeFences(raw: string): string {
+  const s = (raw || "").trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return fence ? fence[1].trim() : s;
+}
+
+// Find the first balanced [...] block, respecting nested brackets and strings.
+function findBalancedArray(raw: string): string | null {
+  const start = raw.indexOf("[");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
   }
+  return null;
+}
+
+function parseTolerant(json: string): any {
+  try {
+    return JSON.parse(json);
+  } catch {
+    // Tolerate trailing commas before } or ].
+    return JSON.parse(json.replace(/,\s*([}\]])/g, "$1"));
+  }
+}
+
+function extractRawArray(raw: string): unknown[] | null {
+  const stripped = stripCodeFences(raw);
+  const arrStr = findBalancedArray(stripped);
+  if (arrStr) {
+    const parsed = parseTolerant(arrStr);
+    if (Array.isArray(parsed)) return parsed;
+  }
+  // Handle a wrapped object like {"cards":[...]} / {"questions":[...]}.
+  const objMatch = stripped.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    const obj = parseTolerant(objMatch[0]);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      const arr = (obj as Record<string, unknown>).cards ??
+        (obj as Record<string, unknown>).questions ??
+        (obj as Record<string, unknown>).items ??
+        (obj as Record<string, unknown>).data;
+      if (Array.isArray(arr)) return arr;
+    }
+  }
+  return null;
+}
+
+// Extract a validated array of items that each have a non-empty front
+// (or question/prompt) and back (or answer), mapping those aliases to
+// {front, back}. Returns T[] for the caller's expected shape.
+export function parseJsonArray<T extends Record<string, any>>(raw: string): T[] {
+  const arr = extractRawArray(raw);
+  if (!arr) throw new Error("Invalid response format from AI: no JSON array found");
+  const out: T[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const obj = item as Record<string, any>;
+    const front = obj.front ?? obj.question ?? obj.prompt ?? obj.q ?? obj.term;
+    const back = obj.back ?? obj.answer ?? obj.a ?? obj.definition;
+    if (typeof front !== "string" || typeof back !== "string") continue;
+    if (!front.trim() || !back.trim()) continue;
+    const normalized: Record<string, any> = { ...obj, front: front.trim(), back: back.trim() };
+    if ("question" in normalized && front === obj.question) delete normalized.question;
+    if ("answer" in normalized && back === obj.answer) delete normalized.answer;
+    out.push(normalized as T);
+  }
+  return out;
 }
 
 async function fetchWithRetry(
   url: string,
-  init: RequestInit,
+  init: RequestInit & { signal?: AbortSignal },
   label: string,
-  provider: string
+  provider = "openrouter",
 ): Promise<Response> {
-  if (isCircuitOpen(provider)) {
-    throw new Error(`AI provider ${provider} is temporarily unavailable. Please try again in a moment.`);
-  }
-
+  const external = init.signal;
+  const { signal: _omit, ...restInit } = init;
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
-      const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-      logger.info({ label, attempt, delayMs: delay }, "Retrying AI request");
-      await new Promise((r) => setTimeout(r, delay));
+      await sleep(BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1));
+    }
+    if (external?.aborted) {
+      const e = new Error("Generation aborted by deadline");
+      e.name = "AbortError";
+      throw e;
     }
     const controller = new AbortController();
+    let onExternal: (() => void) | undefined;
+    if (external) {
+      onExternal = () => controller.abort();
+      external.addEventListener("abort", onExternal, { once: true });
+    }
     const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
     try {
-      const response = await fetch(url, { ...init, signal: controller.signal });
-      if (response.ok) {
-        recordCircuitSuccess(provider);
-        return response;
-      }
-      if (!isRetryableStatus(response.status)) {
-        recordCircuitSuccess(provider);
-        return response;
+      const response = await fetch(url, { ...restInit, signal: controller.signal });
+      if (response.ok || !isRetryableStatus(response.status)) return response;
+      if (isLocalProviderDown(response.status, null, provider)) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`AI API ${response.status}: ${body}`);
       }
       const body = await response.text().catch(() => "");
       lastError = new Error(`AI API ${response.status}: ${body}`);
       logger.warn({ label, status: response.status, attempt: attempt + 1 }, "Retryable AI error");
     } catch (err: any) {
-      if (err?.name === "AbortError") {
-        lastError = new Error("AI request timed out after 4 minutes");
-      } else {
-        lastError = err as Error;
+      if (isLocalProviderDown(null, err, provider)) {
+        const msg = (err?.message || "AI request failed").toString();
+        throw new Error(msg.includes("AI API") ? err : new Error(`AI request failed: ${msg}`));
       }
+      if (external?.aborted) {
+        const e = new Error("Generation aborted by deadline");
+        e.name = "AbortError";
+        lastError = e;
+        break;
+      }
+      lastError = err?.name === "AbortError" ? new Error("AI request timed out") : (err as Error);
       logger.warn({ label, attempt: attempt + 1, err: lastError.message }, "AI request network error");
     } finally {
       clearTimeout(timeout);
+      if (external && onExternal) external.removeEventListener("abort", onExternal);
     }
   }
-  recordCircuitFailure(provider);
   throw lastError || new Error("AI request failed after retries");
 }
 
-export class AIService {
-  private config = getConfig();
+const MODE_PROMPTS: Record<string, string> = {
+  full: `Generate a comprehensive and detailed breakdown of this medical concept, suitable for in-depth learning. Use Markdown headings (##, ###), bullet points, **bold** for key terms, blockquotes (>) for clinical pearls, and pipe tables where useful. Cover Overview, Etiology/Pathophysiology, Clinical Presentation, Diagnosis, Management/Treatment, Complications, and Key Takeaways.`,
+  revision: "Provide a concise revision summary focusing on high-yield facts and common exam points.",
+  osce: "Provide an OSCE-style explanation including what to look for, key findings, and how to present.",
+  brief: "Provide a brief, bullet-point summary of the key points.",
+  mnemonic: "Create helpful mnemonics and memory aids for this topic.",
+  clinical: "Focus on clinical relevance, presentation, diagnosis, and management.",
+  testtrap: "Highlight common exam pitfalls, trick questions, and frequent misconceptions. Use ## headings, bullet points, and **bold** for key terms.",
+};
 
-  private sanitizePromptInput(input: string): string {
-    let sanitized = input.slice(0, 50000);
-    sanitized = sanitized.replace(/ignore\s+(previous|above|all|system)\s+instructions?/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/forget\s+(previous|above|all|system)\s+instructions?/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/you\s+are\s+now\s+/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/pretend\s+(you\s+are|to\s+be)\s+/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/act\s+as\s+if\s+/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/system\s*:\s*/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/<\|im_start\|>/gi, "[FILTERED]");
-    sanitized = sanitized.replace(/<\|im_end\|>/gi, "[FILTERED]");
-    return sanitized;
+export type ExplainMode = "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap";
+
+export class AIService {
+  private config: AppConfig;
+
+  constructor(env: Bindings) {
+    this.config = getConfig(env);
   }
 
-  // Generate a simple text completion
-  async complete(
-    messages: Message[],
-    options: GenerateOptions = {}
-  ): Promise<string> {
+  hasAnyProvider(): boolean {
+    if (this.config.LOCAL_AI_URL) return true;
+    return !!(this.config.OPENROUTER_API_KEY || this.config.OPENAI_API_KEY ||
+      this.config.GROQ_API_KEY || this.config.MISTRAL_API_KEY || this.config.GOOGLE_AI_API_KEY);
+  }
+
+  private sanitizePromptInput(input: string): string {
+    let s = (input || "").slice(0, 1_000_000);
+    s = s.replace(/ignore\s+(previous|above|all|system)\s+instructions?/gi, "[FILTERED]");
+    s = s.replace(/forget\s+(previous|above|all|system)\s+instructions?/gi, "[FILTERED]");
+    s = s.replace(/you\s+are\s+now\s+/gi, "[FILTERED]");
+    s = s.replace(/system\s*:\s*/gi, "[FILTERED]");
+    s = s.replace(/<\|im_start\|>/gi, "[FILTERED]").replace(/<\|im_end\|>/gi, "[FILTERED]");
+    return s;
+  }
+
+  async complete(messages: Message[], options: GenerateOptions = {}): Promise<string> {
     const model = options.model || this.config.AI_TEXT_MODEL;
-    const apiKey = getApiKey(model);
     const { provider } = parseModel(model);
-    
-    if (!apiKey) {
-      const err = new Error(`No API key configured for model: ${model}`);
-      errorLearningService.logError({
-        errorType: "AUTH_ERROR",
-        errorCode: "NO_API_KEY",
-        model,
-        operation: "complete",
-        inputData: JSON.stringify(messages),
-        error: err,
-        context: { temperature: options.temperature },
-      });
-      throw err;
-    }
-
-    const baseUrl = getApiBaseUrl(model);
-    const fullModel = getFullModelName(model);
-
-    const response = await fetchWithRetry(
-      `${baseUrl}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`,
-          "HTTP-Referer": this.config.APP_URL || "http://localhost:5173",
-          "X-Title": "MedNexus",
-        },
-        body: JSON.stringify({
-          model: fullModel,
-          messages,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 8192,
-        }),
-        agent: getAgent(baseUrl),
-      } as RequestInit & { agent: http.Agent | https.Agent },
-      `complete:${model}`,
-      provider
-    );
-
+    const apiKey = getApiKey(model, this.config);
+    if (!apiKey && !isLocalProvider(provider)) throw new Error(`No API key configured for model: ${model}`);
+    const baseUrl = getApiBaseUrl(model, this.config);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "HTTP-Referer": this.config.APP_URL || "https://mednexus.workers.dev",
+      "X-Title": "MedNexus",
+    };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const init: RequestInit & { signal?: AbortSignal } = {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: getFullModelName(model),
+        messages,
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? 8192,
+      }),
+    };
+    if (options.signal) init.signal = options.signal;
+    const response = await fetchWithRetry(`${baseUrl}/chat/completions`, init, `complete:${model}`, provider);
     if (!response.ok) {
       const error = await response.text();
-      logger.error({ status: response.status, error }, "AI API error");
-      const err = new Error(`AI API error: ${response.status} - ${error}`);
-      await errorLearningService.logError({
-        errorType: "API_ERROR",
-        errorCode: response.status.toString(),
-        model,
-        operation: "complete",
-        inputData: JSON.stringify(messages).slice(0, 1000),
-        error: err,
-        context: { status: response.status },
-      });
-      throw err;
+      throw new Error(`AI API error: ${response.status} - ${error}`);
     }
-
-    const data = await response.json() as { choices: Array<{ message: { content: string } }> };
+    const data = (await response.json()) as { choices: Array<{ message: { content: string } }> };
     return data.choices[0]?.message?.content || "";
   }
 
-  // Stream a text completion
-  async *streamComplete(
-    messages: Message[],
-    options: GenerateOptions = {}
-  ): AsyncGenerator<string> {
+  // Stream a completion as an SSE-friendly async generator of text deltas.
+  async *streamComplete(messages: Message[], options: GenerateOptions = {}): AsyncGenerator<string> {
     const model = options.model || this.config.AI_TEXT_MODEL;
-    const apiKey = getApiKey(model);
     const { provider } = parseModel(model);
-
-    if (!apiKey) {
-      const err = new Error(`No API key configured for model: ${model}`);
-      errorLearningService.logError({
-        errorType: "AUTH_ERROR",
-        errorCode: "NO_API_KEY",
-        model,
-        operation: "stream",
-        inputData: JSON.stringify(messages),
-        error: err,
-      });
-      throw err;
-    }
-
-    const baseUrl = getApiBaseUrl(model);
-    const fullModel = getFullModelName(model);
-
-    const response = await fetchWithRetry(
-      `${baseUrl}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`,
-          "HTTP-Referer": this.config.APP_URL || "http://localhost:5173",
-          "X-Title": "MedNexus",
-        },
-        body: JSON.stringify({
-          model: fullModel,
-          messages,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 8192,
-          stream: true,
-        }),
-        agent: getAgent(baseUrl),
-      } as RequestInit & { agent: http.Agent | https.Agent },
-      `stream:${model}`,
-      provider
-    );
-
+    const apiKey = getApiKey(model, this.config);
+    if (!apiKey && !isLocalProvider(provider)) throw new Error(`No API key configured for model: ${model}`);
+    const baseUrl = getApiBaseUrl(model, this.config);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "HTTP-Referer": this.config.APP_URL || "https://mednexus.workers.dev",
+      "X-Title": "MedNexus",
+    };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const response = await fetchWithRetry(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: getFullModelName(model),
+        messages,
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? 8192,
+        stream: true,
+      }),
+    }, `stream:${model}`, provider);
     if (!response.ok) {
       const error = await response.text();
-      logger.error({ status: response.status, error }, "AI API streaming error");
-      const err = new Error(`AI API error: ${response.status} - ${error}`);
-      await errorLearningService.logError({
-        errorType: "API_ERROR",
-        errorCode: response.status.toString(),
-        model,
-        operation: "stream",
-        inputData: JSON.stringify(messages).slice(0, 1000),
-        error: err,
-        context: { status: response.status, streaming: true },
-      });
-      throw err;
+      throw new Error(`AI API error: ${response.status} - ${error}`);
     }
-
     const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error("No response body");
-    }
-
+    if (!reader) throw new Error("No response body");
     const decoder = new TextDecoder();
     let buffer = "";
-
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
-
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith("data: ")) continue;
-
           const data = trimmed.slice(6);
           if (data === "[DONE]") return;
-
           try {
             const parsed = JSON.parse(data);
             const content = parsed.choices[0]?.delta?.content;
             if (content) yield content;
-          } catch {
-            // Skip malformed JSON
-          }
+          } catch { /* skip malformed */ }
         }
       }
     } finally {
@@ -384,18 +418,13 @@ export class AIService {
     }
   }
 
-  // Split text into chunks small enough to fit the model's context window.
   private splitIntoChunks(text: string, maxChars: number): string[] {
     const clean = text.trim();
     if (!clean) return [];
     if (clean.length <= maxChars) return [clean];
-
-    // Prefer splitting on paragraph/blank-line boundaries, then sentences,
-    // falling back to hard character cuts for very long unbroken runs.
     const chunks: string[] = [];
     let current = "";
-    const paragraphs = clean.split(/\n\s*\n/);
-    for (const para of paragraphs) {
+    for (const para of clean.split(/\n\s*\n/)) {
       if (!para.trim()) continue;
       if (current.length + para.length + 2 <= maxChars) {
         current += (current ? "\n\n" : "") + para;
@@ -403,438 +432,265 @@ export class AIService {
         if (current) chunks.push(current);
         current = para;
       } else {
-        // Paragraph itself is too long: break on sentence boundaries.
-        if (current) {
-          chunks.push(current);
-          current = "";
-        }
-        const sentences = para.match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) || [para];
-        let buf = "";
-        for (const sentence of sentences) {
-          if (buf.length + sentence.length <= maxChars) {
-            buf += sentence;
-          } else {
-            if (buf) chunks.push(buf.trim());
-            buf = sentence.length > maxChars ? sentence.slice(0, maxChars) : sentence;
-          }
-        }
-        if (buf) current = buf.trim();
+        if (current) { chunks.push(current); current = ""; }
+        for (let i = 0; i < para.length; i += maxChars) chunks.push(para.slice(i, i + maxChars));
       }
     }
     if (current) chunks.push(current);
     return chunks;
   }
 
-  // Generate flashcards from text (cards only, no explanations)
-  async generateCards(
-    text: string,
-    cardCount: number = 10,
-    options: GenerateOptions = {}
-  ): Promise<GeneratedCard[]> {
+  async generateCards(text: string, cardCount = 10, options: GenerateOptions = {}): Promise<GeneratedCard[]> {
     const model = options.model || this.config.AI_TEXT_MODEL;
-    const errorContext = await errorLearningService.buildErrorContextAsync(
-      "generateCards",
-      model
-    );
-
-    // Large inputs (e.g. uploaded files) can exceed the model's context
-    // window. Split into safe chunks and generate per chunk so the request
-    // always fits and AI is actually used instead of the offline fallback.
-    const sanitized = this.sanitizePromptInput(text);
-    const chunks = this.splitIntoChunks(sanitized, 4000);
+    const chunks = this.splitIntoChunks(this.sanitizePromptInput(text), 4000);
     if (chunks.length === 0) return [];
-
+    const concurrency = Math.max(1, Math.min(options.concurrency ?? 5, 10));
     const perChunk = Math.max(1, Math.ceil(cardCount / chunks.length));
-    const all: GeneratedCard[] = [];
-    for (const chunk of chunks) {
-      const cards = await this.generateCardsChunk(chunk, perChunk, options, model, errorContext.instructions);
-      all.push(...cards);
+    const ac = new AbortController();
+    let onExt: (() => void) | undefined;
+    if (options.signal) {
+      if (options.signal.aborted) return [];
+      onExt = () => ac.abort();
+      options.signal.addEventListener("abort", onExt, { once: true });
     }
-    return all;
+    const timer = options.deadlineMs && options.deadlineMs > 0
+      ? setTimeout(() => ac.abort(), options.deadlineMs)
+      : null;
+    const flatten = (arrs: GeneratedCard[][]) => arrs.reduce<GeneratedCard[]>((a, x) => a.concat(x || []), []);
+    let collected: GeneratedCard[][] = [];
+    try {
+      collected = await runPool(chunks, async (chunk) => {
+        if (ac.signal.aborted) return [];
+        return await this.generateCardsChunk(chunk, perChunk, { ...options, signal: ac.signal }, model);
+      }, concurrency, ac.signal);
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
+      if (ac.signal.aborted) {
+        const items = flatten(collected);
+        if (items.length > 0) throw new PartialGenerationError(items);
+      }
+      throw e;
+    }
+    if (timer) clearTimeout(timer);
+    if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
+    if (ac.signal.aborted) {
+      const items = flatten(collected);
+      if (items.length > 0) throw new PartialGenerationError(items);
+    }
+    return flatten(collected);
   }
 
-  private async generateCardsChunk(
-    chunk: string,
-    count: number,
-    options: GenerateOptions,
-    model: string,
-    extraInstructions?: string
-  ): Promise<GeneratedCard[]> {
+  private async generateCardsChunk(chunk: string, count: number, options: GenerateOptions, model: string): Promise<GeneratedCard[]> {
     const systemPrompt = `You are an expert flashcard creator. Generate ${count} high-quality flashcards from the provided text.
 Rules:
 - Each card should test one key concept
-- Front side: A clear question or prompt
-- Back side: A concise, accurate answer
-- Include relevant tags for categorization
-- Focus on the most important information
-
-Return ONLY a valid JSON array in this format:
-[
-  {
-    "front": "Question or prompt",
-    "back": "Answer",
-    "tags": ["tag1", "tag2"]
-  }
-]${extraInstructions ? "\n\n" + extraInstructions : ""}`;
-
-    const userPrompt = `Generate ${count} flashcards from this text:\n\n${chunk}`;
-
+- Front: a clear question or prompt
+- Back: a concise, accurate answer
+- Include relevant tags
+Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
     const response = await this.complete([
       { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
+      { role: "user", content: `Generate ${count} flashcards from this text:\n\n${chunk}` },
     ], { ...options, model, temperature: 0.5 });
-
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      const err = new Error("Invalid response format from AI: no JSON array found");
-      await errorLearningService.logError({
-        errorType: "PARSE_ERROR",
-        errorCode: "NO_JSON_ARRAY",
-        model,
-        operation: "generateCards",
-        inputData: response.slice(0, 500),
-        error: err,
-        context: { responseLength: response.length },
-      });
-      throw err;
-    }
-
-    try {
-      return JSON.parse(jsonMatch[0]);
-    } catch (parseErr) {
-      const err = new Error(`Failed to parse JSON response: ${(parseErr as Error).message}`);
-      await errorLearningService.logError({
-        errorType: "PARSE_ERROR",
-        errorCode: "JSON_PARSE_FAILED",
-        model,
-        operation: "generateCards",
-        inputData: jsonMatch[0].slice(0, 500),
-        error: err,
-        context: { originalError: (parseErr as Error).message },
-      });
-      throw err;
-    }
+    return parseJsonArray<GeneratedCard>(response);
   }
 
-  // Generate question bank (MCQ) from text
-  async generateQuestions(
-    text: string,
-    questionCount: number = 10,
-    options: GenerateOptions = {}
-  ): Promise<GeneratedQuestion[]> {
+  async generateQuestions(text: string, questionCount = 10, options: GenerateOptions = {}): Promise<GeneratedQuestion[]> {
     const model = options.model || this.config.AI_QBANK_MODEL;
-    const errorContext = await errorLearningService.buildErrorContextAsync(
-      "generateQuestions",
-      model
-    );
-
-    const sanitized = this.sanitizePromptInput(text);
-    const chunks = this.splitIntoChunks(sanitized, 4000);
+    const chunks = this.splitIntoChunks(this.sanitizePromptInput(text), 4000);
     if (chunks.length === 0) return [];
-
+    const concurrency = Math.max(1, Math.min(options.concurrency ?? 5, 10));
     const perChunk = Math.max(1, Math.ceil(questionCount / chunks.length));
-    const all: GeneratedQuestion[] = [];
-    for (const chunk of chunks) {
-      const questions = await this.generateQuestionsChunk(chunk, perChunk, options, model, errorContext.instructions);
-      all.push(...questions);
+    const ac = new AbortController();
+    let onExt: (() => void) | undefined;
+    if (options.signal) {
+      if (options.signal.aborted) return [];
+      onExt = () => ac.abort();
+      options.signal.addEventListener("abort", onExt, { once: true });
     }
-    return all;
+    const timer = options.deadlineMs && options.deadlineMs > 0
+      ? setTimeout(() => ac.abort(), options.deadlineMs)
+      : null;
+    const flatten = (arrs: GeneratedQuestion[][]) => arrs.reduce<GeneratedQuestion[]>((a, x) => a.concat(x || []), []);
+    let collected: GeneratedQuestion[][] = [];
+    try {
+      collected = await runPool(chunks, async (chunk) => {
+        if (ac.signal.aborted) return [];
+        return await this.generateQuestionsChunk(chunk, perChunk, { ...options, signal: ac.signal }, model);
+      }, concurrency, ac.signal);
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
+      if (ac.signal.aborted) {
+        const items = flatten(collected);
+        if (items.length > 0) throw new PartialGenerationError(items);
+      }
+      throw e;
+    }
+    if (timer) clearTimeout(timer);
+    if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
+    if (ac.signal.aborted) {
+      const items = flatten(collected);
+      if (items.length > 0) throw new PartialGenerationError(items);
+    }
+    return flatten(collected);
   }
 
-  private async generateQuestionsChunk(
-    chunk: string,
-    count: number,
-    options: GenerateOptions,
-    model: string,
-    extraInstructions?: string
-  ): Promise<GeneratedQuestion[]> {
-    const systemPrompt = `You are an expert question bank creator for medical/educational exams. Generate ${count} high-quality multiple-choice questions from the provided text.
+  private async generateQuestionsChunk(chunk: string, count: number, options: GenerateOptions, model: string): Promise<GeneratedQuestion[]> {
+    const systemPrompt = `You are an expert question bank creator for medical exams. Generate ${count} multiple-choice questions from the provided text.
 Rules:
-- Each question should test clinical reasoning or key knowledge
-- Include a clinical vignette when appropriate
+- Test clinical reasoning; include a vignette when appropriate
 - Provide 4-5 plausible distractors
 - Mark the correct answer with correctIndex (0-based)
-- Include a detailed explanation for the correct answer
-
-Return ONLY a valid JSON array in this format:
-[
-  {
-    "front": "Question text with vignette if applicable",
-    "back": "Brief answer summary",
-    "choices": ["Option A", "Option B", "Option C", "Option D"],
-    "correctIndex": 0,
-    "explanation": "Detailed explanation of why the correct answer is right and others are wrong"
-  }
-]${extraInstructions ? "\n\n" + extraInstructions : ""}`;
-
-    const userPrompt = `Generate ${count} multiple-choice questions from this text:\n\n${chunk}`;
-
+- Include a detailed explanation
+Return ONLY a valid JSON array: [{"front":"...","back":"...","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
     const response = await this.complete([
       { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
+      { role: "user", content: `Generate ${count} multiple-choice questions from this text:\n\n${chunk}` },
     ], { ...options, model, temperature: 0.5 });
+    return parseJsonArray<GeneratedQuestion>(response).map((q) => ({
+      front: q.front,
+      back: q.back,
+      choices: Array.isArray(q.choices) ? q.choices.filter((c) => typeof c === "string") : [],
+      correctIndex: typeof q.correctIndex === "number" ? q.correctIndex : 0,
+      explanation: q.explanation,
+    }));
+  }
 
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      const err = new Error("Invalid response format from AI: no JSON array found");
-      await errorLearningService.logError({
-        errorType: "PARSE_ERROR",
-        errorCode: "NO_JSON_ARRAY",
-        model,
-        operation: "generateQuestions",
-        inputData: response.slice(0, 500),
-        error: err,
-        context: { responseLength: response.length },
-      });
-      throw err;
-    }
+  async explainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): Promise<string> {
+    const model = options.model || this.config.AI_EXPLAIN_MODEL;
+    const systemPrompt = `You are an expert medical educator creating study materials for medical students. ${MODE_PROMPTS[mode]}
 
+IMPORTANT: Return ONLY the formatted Markdown content. No meta-commentary.`;
+    const userPrompt = `Generate a ${mode === "full" ? "comprehensive full explanation" : mode + " explanation"} for this medical concept:
+
+Question/Front: ${this.sanitizePromptInput(front)}
+Answer/Back: ${this.sanitizePromptInput(back)}`;
     try {
-      return JSON.parse(jsonMatch[0]);
-    } catch (parseErr) {
-      const err = new Error(`Failed to parse JSON response: ${(parseErr as Error).message}`);
-      await errorLearningService.logError({
-        errorType: "PARSE_ERROR",
-        errorCode: "JSON_PARSE_FAILED",
-        model,
-        operation: "generateQuestions",
-        inputData: jsonMatch[0].slice(0, 500),
-        error: err,
-        context: { originalError: (parseErr as Error).message },
-      });
+      return await this.complete([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ], { ...options, model, temperature: 0.7, maxTokens: 2048 });
+    } catch (err) {
+      // Local model (LM Studio / Ollama) is often unavailable on the edge.
+      // Retry once against OpenRouter (key is configured) so StudyPilot still
+      // gets a real, structured explanation instead of the offline fallback.
+      if (this.config.OPENROUTER_API_KEY && !String(model).startsWith("openrouter/")) {
+        logger.warn({ err }, "StudyPilot explain local AI failed, retrying via OpenRouter");
+        try {
+          return await this.complete([
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ], { ...options, model: "openrouter/deepseek/deepseek-r1-distill-llama-70b", temperature: 0.7, maxTokens: 2048 });
+        } catch (err2) {
+          logger.warn({ err: err2 }, "StudyPilot explain OpenRouter fallback failed");
+          throw err;
+        }
+      }
       throw err;
     }
   }
 
-  // Generate explanation for a card
-  async explainCard(
-    front: string,
-    back: string,
-    mode: "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap" = "full",
-    options: GenerateOptions = {}
-  ): Promise<string> {
-    const model = options.model || this.config.AI_EXPLAIN_MODEL;
-    
-    const modePrompts: Record<string, string> = {
-      full: `Generate a comprehensive and detailed breakdown of this medical concept, suitable for in-depth learning and understanding. The explanation should cover all essential aspects of the topic, providing a foundational knowledge base.
+  // Delimiter headers the model must use to return every mode in ONE call.
+  // Kept exact so the parser below can split reliably.
+  static readonly ALL_MODE_HEADERS: Record<ExplainMode, string> = {
+    full: "FULL EXPLANATION",
+    revision: "REVISION",
+    osce: "OSCE",
+    brief: "BRIEF",
+    mnemonic: "MNEMONIC",
+    clinical: "CLINICAL",
+    testtrap: "TESTTRAP",
+  };
 
-## Structure and Content Guidelines
-
-### Title
-The title should clearly state "Full Explanation" and the specific topic.
-
-### Introduction
-Begin with a concise introduction that briefly defines the topic and outlines what will be covered in the explanation.
-
-### Core Content Sections
-Organize the main body into logical sections using Markdown headings. Include these sections as applicable:
-
-- **Overview**: Provide a general understanding and context of the topic.
-- **Etiology/Pathophysiology**: Discuss the causes and mechanisms of the condition or process. Explain HOW and WHY the medical phenomenon occurs.
-- **Clinical Presentation**: Describe the signs, symptoms, and typical manifestations of the condition in patients.
-- **Diagnosis**: Detail the methods and criteria used to diagnose the condition, including relevant tests and their interpretation.
-- **Management/Treatment**: Outline the therapeutic approaches, interventions, and strategies for managing the condition.
-- **Complications**: Discuss potential adverse outcomes or sequelae associated with the condition or its treatment.
-- **Key Takeaways**: Conclude with a summary of the most critical information as concise bullet points.
-
-### Formatting Instructions
-- Use appropriate Markdown headings (##, ###) to structure the content logically
-- Write detailed, well-structured paragraphs for comprehensive explanations
-- Utilize bullet points or numbered lists for enumerating items
-- Use **bold** text for key terms, concepts, or phrases that require emphasis
-- Use Markdown blockquotes (>) to create callout boxes for important notes, clinical pearls, or warnings
-- Use Markdown pipe tables for data presentation (e.g., differential diagnoses, drug dosages)`,
-      revision: "Provide a concise revision summary focusing on high-yield facts and common exam points.",
-      osce: "Provide an OSCE-style explanation including what to look for, key findings, and how to present.",
-      brief: "Provide a brief, bullet-point summary of the key points.",
-      mnemonic: "Create helpful mnemonics and memory aids for this topic.",
-      clinical: "Focus on clinical relevance, presentation, diagnosis, and management.",
-      testtrap: `Generate content that highlights common exam pitfalls, trick questions, or frequent misconceptions related to a medical concept.
-
-## Structure
-
-### Title
-"Test Trap: [Concept/Scenario]"
-
-### Introduction
-Brief explanation of the common error or tricky concept.
-
-### The Trap
-Describe the common misconception or trick question.
-
-### Why it's a Trap
-Explain the underlying reason for the error.
-
-### How to Avoid
-Provide actionable strategies to prevent falling into the trap.
-
-### Example Question (Optional)
-Include an example question with explanation of the correct answer.
-
-## Formatting
-- Use ## headings for sections
-- Use bullet points for "How to Avoid" strategies
-- Use **bold** for key terms
-- Use blockquotes (>) for example questions`,
+  // Split a single markdown response containing all 7 delimited sections into
+  // per-mode content. Falls back gracefully: any missing section becomes "".
+  private parseAllModes(markdown: string): Record<ExplainMode, string> {
+    const out: Record<ExplainMode, string> = {
+      full: "", revision: "", osce: "", brief: "", mnemonic: "", clinical: "", testtrap: "",
     };
+    const lines = (markdown || "").split(/\r?\n/);
+    let current: ExplainMode | null = null;
+    let buffer: string[] = [];
+    const flush = () => {
+      if (current) out[current] = buffer.join("\n").trim();
+      buffer = [];
+    };
+    for (const line of lines) {
+      const m = line.match(/^##\s+(.+?)\s*$/i);
+      if (m) {
+        const header = m[1].trim().toUpperCase();
+        const matched = (Object.entries(AIService.ALL_MODE_HEADERS) as [ExplainMode, string][])
+          .find(([, h]) => header === h || header.startsWith(h) || header.includes(h.split(" ")[0]));
+        if (matched) {
+          flush();
+          current = matched[0];
+          continue;
+        }
+      }
+      if (current) buffer.push(line);
+    }
+    flush();
+    return out;
+  }
 
-    const systemPrompt = `You are an expert medical educator creating comprehensive study materials for medical students. ${modePrompts[mode]}
+  // Parse a batched response containing several cards (each delimited by
+  // `=== CARD <n> ===`) into per-card mode maps. Any missing
+  // card/mode falls back to "".
+  private parseBatch(raw: string): Record<number, Record<ExplainMode, string>> {
+    const out: Record<number, Record<ExplainMode, string>> = {};
+    const segments = (raw || "").split(/^=== CARD \d+ ===\s*$/im).slice(1);
+    let n = 1;
+    for (const seg of segments) {
+      out[n] = this.parseAllModes(seg);
+      n++;
+    }
+    return out;
+  }
 
-IMPORTANT: Return ONLY the formatted Markdown content. Do not include any meta-commentary or explanations about what you're doing.`;
+  // Generate ALL 7 explanation modes for up to N cards in a SINGLE AI
+  // call. Collapses what used to be 7*N requests down to 1, which is
+  // essential on rate-limited free tiers (e.g. 50 req/day): 55 cards
+  // become ~6 requests, not 385. Returns a map keyed by the 1-based
+  // card index used in the prompt.
+  async explainCardsBatch(cards: { front: string; back: string }[], options: GenerateOptions = {}): Promise<Record<number, Record<ExplainMode, string>>> {
+    const model = options.model || this.config.AI_EXPLAIN_MODEL;
+    const headerList = (Object.values(AIService.ALL_MODE_HEADERS) as string[]).join(", ");
+    const cardLines = cards.map((c, i) =>
+      `CARD ${i + 1}\nFront: ${this.sanitizePromptInput(c.front)}\nBack: ${this.sanitizePromptInput(c.back)}`
+    ).join("\n\n");
 
-    const userPrompt = `Generate a ${mode === 'full' ? 'comprehensive full explanation' : mode + ' explanation'} for this medical concept:
+    const systemPrompt = `You are an expert medical educator creating study materials for medical students.
+You will be given several flashcards. For EACH card, generate ALL of the following explanation modes, in this exact order, each starting with its OWN level-2 markdown header (exactly: ${headerList}).
+Use rich Markdown (## sub-sections, bullet points, **bold** key terms, > blockquotes for clinical pearls, pipe tables where useful) inside each section.
+Separate each card with exactly this line: === CARD <n> === (where <n> is the 1-based card number).
+Do NOT add any commentary before the first card or after the last.`;
+    const userPrompt = `Generate explanations for every card below:\n\n${cardLines}\n\nReturn all cards now.`;
 
-Question/Front: ${this.sanitizePromptInput(front)}
-Answer/Back: ${this.sanitizePromptInput(back)}
-
-${mode === 'full' ? 'Create a complete study document that a medical student can use to thoroughly understand this topic.' : ''}`;
-
-    return this.complete([
+    const raw = await this.complete([
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
-    ], { ...options, model, temperature: 0.7, maxTokens: 2048 });
+    ], { ...options, model, temperature: 0.7, maxTokens: 8000 });
+    return this.parseBatch(raw);
   }
 
-  // Stream explanation for a card
-  async *streamExplainCard(
-    front: string,
-    back: string,
-    mode: "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap" = "full",
-    options: GenerateOptions = {}
-  ): AsyncGenerator<string> {
+  async *streamExplainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): AsyncGenerator<string> {
     const model = options.model || this.config.AI_EXPLAIN_MODEL;
-    
-    const modePrompts: Record<string, string> = {
-      full: `Generate a comprehensive and detailed breakdown of this medical concept, suitable for in-depth learning and understanding. The explanation should cover all essential aspects of the topic, providing a foundational knowledge base.
+    const systemPrompt = `You are an expert medical educator creating study materials for medical students. ${MODE_PROMPTS[mode]}
 
-## Structure and Content Guidelines
-
-### Title
-The title should clearly state "Full Explanation" and the specific topic.
-
-### Introduction
-Begin with a concise introduction that briefly defines the topic and outlines what will be covered in the explanation.
-
-### Core Content Sections
-Organize the main body into logical sections using Markdown headings. Include these sections as applicable:
-
-- **Overview**: Provide a general understanding and context of the topic.
-- **Etiology/Pathophysiology**: Discuss the causes and mechanisms of the condition or process. Explain HOW and WHY the medical phenomenon occurs.
-- **Clinical Presentation**: Describe the signs, symptoms, and typical manifestations of the condition in patients.
-- **Diagnosis**: Detail the methods and criteria used to diagnose the condition, including relevant tests and their interpretation.
-- **Management/Treatment**: Outline the therapeutic approaches, interventions, and strategies for managing the condition.
-- **Complications**: Discuss potential adverse outcomes or sequelae associated with the condition or its treatment.
-- **Key Takeaways**: Conclude with a summary of the most critical information as concise bullet points.
-
-### Formatting Instructions
-- Use appropriate Markdown headings (##, ###) to structure the content logically
-- Write detailed, well-structured paragraphs for comprehensive explanations
-- Utilize bullet points or numbered lists for enumerating items
-- Use **bold** text for key terms, concepts, or phrases that require emphasis
-- Use Markdown blockquotes (>) to create callout boxes for important notes, clinical pearls, or warnings
-- Use Markdown pipe tables for data presentation (e.g., differential diagnoses, drug dosages)`,
-      revision: "Provide a concise revision summary focusing on high-yield facts and common exam points.",
-      osce: "Provide an OSCE-style explanation including what to look for, key findings, and how to present.",
-      brief: "Provide a brief, bullet-point summary of the key points.",
-      mnemonic: "Create helpful mnemonics and memory aids for this topic.",
-      clinical: "Focus on clinical relevance, presentation, diagnosis, and management.",
-      testtrap: `Generate content that highlights common exam pitfalls, trick questions, or frequent misconceptions related to a medical concept.
-
-## Structure
-
-### Title
-"Test Trap: [Concept/Scenario]"
-
-### Introduction
-Brief explanation of the common error or tricky concept.
-
-### The Trap
-Describe the common misconception or trick question.
-
-### Why it's a Trap
-Explain the underlying reason for the error.
-
-### How to Avoid
-Provide actionable strategies to prevent falling into the trap.
-
-### Example Question (Optional)
-Include an example question with explanation of the correct answer.
-
-## Formatting
-- Use ## headings for sections
-- Use bullet points for "How to Avoid" strategies
-- Use **bold** for key terms
-- Use blockquotes (>) for example questions`,
-    };
-
-    const systemPrompt = `You are an expert medical educator creating comprehensive study materials for medical students. ${modePrompts[mode]}
-
-IMPORTANT: Return ONLY the formatted Markdown content. Do not include any meta-commentary or explanations about what you're doing.`;
-
-    const userPrompt = `Generate a ${mode === 'full' ? 'comprehensive full explanation' : mode + ' explanation'} for this medical concept:
+IMPORTANT: Return ONLY the formatted Markdown content. No meta-commentary.`;
+    const userPrompt = `Generate a ${mode === "full" ? "comprehensive full explanation" : mode + " explanation"} for this medical concept:
 
 Question/Front: ${this.sanitizePromptInput(front)}
-Answer/Back: ${this.sanitizePromptInput(back)}
-
-${mode === 'full' ? 'Create a complete study document that a medical student can use to thoroughly understand this topic.' : ''}`;
-
+Answer/Back: ${this.sanitizePromptInput(back)}`;
     yield* this.streamComplete([
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ], { ...options, model, temperature: 0.7, maxTokens: 2048 });
   }
-
-  // Stream card generation
-  async *streamGenerateCards(
-    text: string,
-    cardCount: number = 10,
-    options: GenerateOptions = {}
-  ): AsyncGenerator<{ type: "progress" | "card" | "done"; data: unknown }> {
-    const model = options.model || this.config.AI_TEXT_MODEL;
-    
-    const systemPrompt = `You are an expert flashcard creator. Generate ${cardCount} high-quality flashcards from the provided text.
-Rules:
-- Each card should test one key concept
-- Front side: A clear question or prompt
-- Back side: A concise, accurate answer
-- Include relevant tags for categorization
-- Focus on the most important information
-
-Return ONLY a valid JSON array in this format:
-[
-  {
-    "front": "Question or prompt",
-    "back": "Answer",
-    "tags": ["tag1", "tag2"]
-  }
-]`;
-
-    const userPrompt = `Generate ${cardCount} flashcards from this text:\n\n${text}`;
-
-    yield { type: "progress", data: { message: "Generating flashcards..." } };
-
-    let fullResponse = "";
-    for await (const chunk of this.streamComplete([
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ], { ...options, model, temperature: 0.5 })) {
-      fullResponse += chunk;
-    }
-
-    const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error("Invalid response format from AI");
-    }
-
-    const cards = JSON.parse(jsonMatch[0]);
-    
-    for (const card of cards) {
-      yield { type: "card", data: card };
-    }
-
-    yield { type: "done", data: { count: cards.length } };
-  }
 }
 
-// Singleton instance
-export const aiService = new AIService();
+export function createAIService(env: Bindings): AIService {
+  return new AIService(env);
+}

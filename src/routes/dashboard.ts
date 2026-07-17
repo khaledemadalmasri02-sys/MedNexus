@@ -1,13 +1,12 @@
-import { Router, Request, Response } from "express";
-import { db, cardProgress, cards, decks, studySessions, users, achievements, userSettings } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, and, isNull, sql, lte, gte, inArray, desc } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { users, decks, cards, cardProgress, studySessions, achievements, userSettings } from "../db/index";
+import { getDb, getUserId, isAuthenticated, unauthorized, serverError } from "../lib/helpers";
+import { logger } from "../lib/logger";
 
-const router = Router();
-
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+export const dashboardRoutes = new Hono<AppEnv>();
 
 function ownerFilter(userId: string | null) {
   return userId ? eq(cardProgress.userId, userId) : isNull(cardProgress.userId);
@@ -40,18 +39,16 @@ function invalidateCache(userId: string): void {
   }
 }
 
-router.get("/dashboard", async (req: Request, res: Response) => {
+dashboardRoutes.get("/dashboard", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     if (!userId) {
-      res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } });
-      return;
+      return unauthorized(c);
     }
 
     const cached = getCached(userId, "full");
     if (cached) {
-      res.json(cached);
-      return;
+      return c.json(cached);
     }
 
     const today = new Date();
@@ -62,6 +59,7 @@ router.get("/dashboard", async (req: Request, res: Response) => {
     const todayEnd = new Date(today);
     todayEnd.setHours(23, 59, 59, 999);
 
+    const db = getDb(c);
     const [
       user,
       allDecks,
@@ -155,7 +153,6 @@ router.get("/dashboard", async (req: Request, res: Response) => {
 
     const lastStudyDate = sortedDates.length > 0 ? sortedDates[sortedDates.length - 1] : null;
 
-    let state = "caught_up";
     let stateData: any = { state: "caught_up", dueCards: 0, streak: currentStreak, userName: firstName };
 
     if (totalDecks === 0) {
@@ -268,23 +265,24 @@ router.get("/dashboard", async (req: Request, res: Response) => {
     };
 
     setCached(userId, "full", result);
-    res.json(result);
+    return c.json(result);
   } catch (err) {
     logger.error({ err }, "Failed to get dashboard data");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get dashboard data" } });
+    return serverError(c, "Failed to get dashboard data");
   }
 });
 
-router.patch("/dashboard/goals", async (req: Request, res: Response) => {
+dashboardRoutes.patch("/dashboard/goals", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     if (!userId) {
-      res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } });
-      return;
+      return unauthorized(c);
     }
 
-    const { dailyGoalMinutes, dailyGoalCards, reminderTime, accentColor, density, soundEnabled } = req.body;
+    const body = await c.req.json().catch(() => ({})) as any;
+    const { dailyGoalMinutes, dailyGoalCards, reminderTime, accentColor, density, soundEnabled } = body;
     const now = new Date();
+    const db = getDb(c);
 
     const existing = await db.query.userSettings.findFirst({
       where: eq(userSettings.userId, userId),
@@ -319,22 +317,23 @@ router.patch("/dashboard/goals", async (req: Request, res: Response) => {
     const updated = await db.query.userSettings.findFirst({
       where: eq(userSettings.userId, userId),
     });
-    res.json(updated);
+    return c.json(updated);
   } catch (err) {
     logger.error({ err }, "Failed to update goals");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to update goals" } });
+    return serverError(c, "Failed to update goals");
   }
 });
 
-router.get("/dashboard/queue", async (req: Request, res: Response) => {
+dashboardRoutes.get("/dashboard/queue", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     const today = new Date().toISOString().split("T")[0];
     const items: Array<{
       id: string; type: string; title: string; subtitle: string;
       estimatedMin: number; actionLabel: string; actionUrl: string; color: string;
     }> = [];
 
+    const db = getDb(c);
     const [dueRecords, recentSession, settings] = await Promise.all([
       db.query.cardProgress.findMany({
         where: and(lte(cardProgress.nextReviewDate, today), ownerFilter(userId)),
@@ -433,21 +432,21 @@ router.get("/dashboard/queue", async (req: Request, res: Response) => {
       });
     }
 
-    res.json({ items, allClear });
+    return c.json({ items, allClear });
   } catch (err) {
     logger.error({ err }, "Failed to get queue data");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get queue data" } });
+    return serverError(c, "Failed to get queue data");
   }
 });
 
-router.get("/achievements", async (req: Request, res: Response) => {
+dashboardRoutes.get("/achievements", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     if (!userId) {
-      res.json({ recent: [], total: 0, unseen: 0 });
-      return;
+      return c.json({ recent: [], total: 0, unseen: 0 });
     }
 
+    const db = getDb(c);
     const [userAchievements, total, unseen] = await Promise.all([
       db.query.achievements.findMany({
         where: eq(achievements.userId, userId),
@@ -458,46 +457,45 @@ router.get("/achievements", async (req: Request, res: Response) => {
       db.select({ count: sql<number>`count(*)` }).from(achievements).where(and(eq(achievements.userId, userId), eq(achievements.seen, false))),
     ]);
 
-    res.json({
+    return c.json({
       recent: userAchievements,
       total: total[0]?.count || 0,
       unseen: unseen[0]?.count || 0,
     });
   } catch (err) {
     logger.error({ err }, "Failed to get achievements");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get achievements" } });
+    return serverError(c, "Failed to get achievements");
   }
 });
 
-router.post("/achievements/:id/seen", async (req: Request, res: Response) => {
+dashboardRoutes.post("/achievements/:id/seen", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     if (!userId) {
-      res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Authentication required" } });
-      return;
+      return unauthorized(c);
     }
 
-    const achievementId = parseInt(req.params.id, 10);
-    await db.update(achievements)
+    const achievementId = parseInt(c.req.param("id") ?? "", 10);
+    await getDb(c).update(achievements)
       .set({ seen: true })
       .where(and(eq(achievements.id, achievementId), eq(achievements.userId, userId)));
 
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
     logger.error({ err }, "Failed to mark achievement seen");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to mark achievement seen" } });
+    return serverError(c, "Failed to mark achievement seen");
   }
 });
 
-router.post("/achievements/check", async (req: Request, res: Response) => {
+dashboardRoutes.post("/achievements/check", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     if (!userId) {
-      res.json({ newlyUnlocked: [] });
-      return;
+      return c.json({ newlyUnlocked: [] });
     }
 
     const newlyUnlocked: Array<{ type: string; title: string; description: string; icon: string }> = [];
+    const db = getDb(c);
 
     const [existingTypes, allSessions, totalDecksResult] = await Promise.all([
       db.query.achievements.findMany({ where: eq(achievements.userId, userId) }),
@@ -560,11 +558,9 @@ router.post("/achievements/check", async (req: Request, res: Response) => {
       }
     }
 
-    res.json({ newlyUnlocked });
+    return c.json({ newlyUnlocked });
   } catch (err) {
     logger.error({ err }, "Failed to check achievements");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to check achievements" } });
+    return serverError(c, "Failed to check achievements");
   }
 });
-
-export default router;

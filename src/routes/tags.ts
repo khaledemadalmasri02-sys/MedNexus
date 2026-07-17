@@ -1,16 +1,16 @@
-import { Router, Request, Response } from "express";
-import { db, tags, deckTags, qbankTags, decks } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, and, isNull, inArray, sql } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
 import { z } from "zod";
-import { validateBody } from "../middleware/validate.js";
-import { deckTagsSchema } from "./validators.js";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { tags, deckTags, qbankTags, decks } from "../db/index";
+import { validate } from "../middleware/validate";
+import { logger } from "../lib/logger";
 
-const router = Router();
+export const tagRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+function getDb(c: any): DB { return c.get("db"); }
+function getUserId(c: any): string | null { return c.get("user")?.id ?? null; }
 
 const createTagSchema = z.object({
   name: z.string().min(1).max(50),
@@ -22,36 +22,39 @@ const updateTagSchema = z.object({
   color: z.string().max(20).optional(),
 });
 
-// ── GET /api/tags — list all tags with usage count ──
-router.get("/tags", async (req: Request, res: Response) => {
+const deckTagsSchema = z.object({
+  tagIds: z.array(z.number().int().positive()).min(1).max(50),
+});
+
+// ── GET /api/tags ──
+tagRoutes.get("/tags", async (c) => {
   try {
-    const userId = getUserId(req);
-    const userTags = await db.query.tags.findMany({
+    const userId = getUserId(c);
+    const userTags = await getDb(c).query.tags.findMany({
       where: userId ? eq(tags.userId, userId) : isNull(tags.userId),
     });
 
     if (userTags.length === 0) {
-      res.json([]);
-      return;
+      return c.json([]);
     }
 
-    const tagIds = userTags.map(t => t.id);
+    const tagIds = userTags.map((t) => t.id);
 
     const [deckCounts, qbankCounts] = await Promise.all([
-      db.select({ tagId: deckTags.tagId, count: sql<number>`count(*)` })
+      getDb(c).select({ tagId: deckTags.tagId, count: sql<number>`count(*)` })
         .from(deckTags)
         .where(inArray(deckTags.tagId, tagIds))
         .groupBy(deckTags.tagId),
-      db.select({ tagId: qbankTags.tagId, count: sql<number>`count(*)` })
+      getDb(c).select({ tagId: qbankTags.tagId, count: sql<number>`count(*)` })
         .from(qbankTags)
         .where(inArray(qbankTags.tagId, tagIds))
         .groupBy(qbankTags.tagId),
     ]);
 
-    const deckCountMap = new Map(deckCounts.map(c => [c.tagId, c.count]));
-    const qbankCountMap = new Map(qbankCounts.map(c => [c.tagId, c.count]));
+    const deckCountMap = new Map(deckCounts.map((cc) => [cc.tagId, cc.count]));
+    const qbankCountMap = new Map(qbankCounts.map((qc) => [qc.tagId, qc.count]));
 
-    const tagsWithCount = userTags.map(tag => {
+    const tagsWithCount = userTags.map((tag) => {
       const deckCount = deckCountMap.get(tag.id) || 0;
       const qbankCount = qbankCountMap.get(tag.id) || 0;
       return {
@@ -62,106 +65,103 @@ router.get("/tags", async (req: Request, res: Response) => {
       };
     });
 
-    res.json(tagsWithCount);
+    return c.json(tagsWithCount);
   } catch (err) {
     logger.error({ err }, "Failed to list tags");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list tags" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to list tags" } }, 500);
   }
 });
 
-// ── POST /api/tags — create tag ──
-router.post("/tags", validateBody(createTagSchema), async (req: Request, res: Response) => {
-  const { name, color } = req.body;
+// ── POST /api/tags ──
+tagRoutes.post("/tags", validate(createTagSchema), async (c) => {
+  const { name, color } = c.get("validated") as any;
   try {
-    const userId = getUserId(req);
-    const [tag] = await db.insert(tags).values({ name, color: color || "#06B6D4", userId }).returning();
-    res.status(201).json({ ...tag, deckCount: 0, qbankCount: 0, totalCount: 0 });
+    const userId = getUserId(c);
+    const [tag] = await getDb(c).insert(tags).values({ name, color: color || "#06B6D4", userId }).returning();
+    return c.json({ ...tag, deckCount: 0, qbankCount: 0, totalCount: 0 }, 201);
   } catch (err) {
     logger.error({ err }, "Failed to create tag");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to create tag" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to create tag" } }, 500);
   }
 });
 
-// ── PATCH /api/tags/:id — update tag ──
-router.patch("/tags/:id", validateBody(updateTagSchema), async (req: Request, res: Response) => {
-  const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) { res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }); return; }
+// ── PATCH /api/tags/:id ──
+tagRoutes.patch("/tags/:id", validate(updateTagSchema), async (c) => {
+  const id = parseInt(c.req.param("id") ?? "", 10);
+  if (isNaN(id)) { return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400); }
 
-  const userId = getUserId(req);
+  const userId = getUserId(c);
   try {
-    const existing = await db.query.tags.findFirst({ where: eq(tags.id, id) });
+    const existing = await getDb(c).query.tags.findFirst({ where: eq(tags.id, id) });
     if (!existing || (userId && existing.userId !== userId) || (!userId && existing.userId !== null)) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Tag not found" } }); return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Tag not found" } }, 404);
     }
 
-    const [updated] = await db.update(tags).set({
-      name: req.body.name ?? existing.name,
-      color: req.body.color ?? existing.color,
+    const { name, color } = c.get("validated") as any;
+    const [updated] = await getDb(c).update(tags).set({
+      name: name ?? existing.name,
+      color: color ?? existing.color,
     }).where(eq(tags.id, id)).returning();
 
-    res.json(updated);
+    return c.json(updated);
   } catch (err) {
     logger.error({ err }, "Failed to update tag");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to update tag" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to update tag" } }, 500);
   }
 });
 
 // ── DELETE /api/tags/:id ──
-router.delete("/tags/:id", async (req: Request, res: Response) => {
-  const id = parseInt(req.params.id, 10);
-  if (isNaN(id)) { res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }); return; }
+tagRoutes.delete("/tags/:id", async (c) => {
+  const id = parseInt(c.req.param("id") ?? "", 10);
+  if (isNaN(id)) { return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400); }
 
   try {
-    await db.delete(deckTags).where(eq(deckTags.tagId, id));
-    await db.delete(qbankTags).where(eq(qbankTags.tagId, id));
-    await db.delete(tags).where(eq(tags.id, id));
-    res.status(204).send();
+    await getDb(c).delete(deckTags).where(eq(deckTags.tagId, id));
+    await getDb(c).delete(qbankTags).where(eq(qbankTags.tagId, id));
+    await getDb(c).delete(tags).where(eq(tags.id, id));
+    return new Response(null, { status: 204 });
   } catch (err) {
     logger.error({ err }, "Failed to delete tag");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete tag" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete tag" } }, 500);
   }
 });
 
-// ── POST /api/decks/:id/tags — add tags to deck ──
-router.post("/decks/:id/tags", validateBody(deckTagsSchema), async (req: Request, res: Response) => {
-  const deckId = parseInt(req.params.id, 10);
-  if (isNaN(deckId)) { res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } }); return; }
+// ── POST /api/decks/:id/tags ──
+tagRoutes.post("/decks/:id/tags", validate(deckTagsSchema), async (c) => {
+  const deckId = parseInt(c.req.param("id") ?? "", 10);
+  if (isNaN(deckId)) { return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } }, 400); }
 
-  const { tagIds } = req.body as { tagIds: number[] };
+  const { tagIds } = c.get("validated") as any;
   if (!Array.isArray(tagIds) || tagIds.length === 0) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "tagIds array required" } }); return;
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "tagIds array required" } }, 400);
   }
 
   try {
-    const userId = getUserId(req);
-    const deck = await db.query.decks.findFirst({ where: eq(decks.id, deckId) });
+    const userId = getUserId(c);
+    const deck = await getDb(c).query.decks.findFirst({ where: eq(decks.id, deckId) });
     if (!deck || (userId && deck.userId !== userId) || (!userId && deck.userId !== null)) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Deck not found" } }); return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Deck not found" } }, 404);
     }
 
-    await db.insert(deckTags).values(tagIds.map(tagId => ({ deckId, tagId })));
-    res.status(201).json({ success: true });
+    await getDb(c).insert(deckTags).values(tagIds.map((tagId: number) => ({ deckId, tagId })));
+    return c.json({ success: true }, 201);
   } catch (err) {
     logger.error({ err }, "Failed to add tags to deck");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to add tags" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to add tags" } }, 500);
   }
 });
 
-// ── DELETE /api/decks/:id/tags/:tagId — remove tag from deck ──
-router.delete("/decks/:id/tags/:tagId", async (req: Request, res: Response) => {
-  const deckId = parseInt(req.params.id, 10);
-  const tagId = parseInt(req.params.tagId, 10);
-  if (isNaN(deckId) || isNaN(tagId)) { res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }); return; }
+// ── DELETE /api/decks/:id/tags/:tagId ──
+tagRoutes.delete("/decks/:id/tags/:tagId", async (c) => {
+  const deckId = parseInt(c.req.param("id") ?? "", 10);
+  const tagId = parseInt(c.req.param("tagId") ?? "", 10);
+  if (isNaN(deckId) || isNaN(tagId)) { return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400); }
 
   try {
-    await db.delete(deckTags).where(and(eq(deckTags.deckId, deckId), eq(deckTags.tagId, tagId)));
-    res.status(204).send();
+    await getDb(c).delete(deckTags).where(and(eq(deckTags.deckId, deckId), eq(deckTags.tagId, tagId)));
+    return new Response(null, { status: 204 });
   } catch (err) {
     logger.error({ err }, "Failed to remove tag from deck");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to remove tag" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to remove tag" } }, 500);
   }
 });
-
-export default router;
-
-

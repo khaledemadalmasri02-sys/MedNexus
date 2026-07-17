@@ -1,0 +1,43 @@
+name = "mednexus-cloudflare"
+main = "src/worker.ts"
+compatibility_date = "2024-11-27"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the built SPA from the same origin as the API.
+assets = { directory = "./public", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+# D1 SQLite database
+[[d1_databases]]
+binding = "DB"
+database_name = "mednexus-db"
+database_id = "278eb472-eda7-4231-8243-e9946b589e2a"
+migrations_dir = "migrations"
+
+# Non-secret configuration (safe to commit)
+[vars]
+NODE_ENV = "production"
+FREE_MAX_DECKS = "100"
+FREE_MAX_CARDS_PER_DECK = "200"
+
+# Local LM Studio server exposed via a PERSISTENT Cloudflare Tunnel (OpenAI-compatible
+# /v1 API). No API key required. This quick-tunnel URL is stable only while the
+# cloudflared process on this host stays running. For a reboot-safe, fixed URL use a
+# named tunnel on the LM Studio machine. Model id = whatever is loaded in LM Studio.
+LOCAL_AI_URL = "https://coalition-attendance-joyce-introduce.trycloudflare.com/v1"
+AI_TEXT_MODEL = "local/qwen3-vl-4b-instruct"
+AI_VISION_MODEL = "local/qwen3-vl-4b-instruct"
+AI_QBANK_MODEL = "local/qwen3-vl-4b-instruct"
+AI_EXPLAIN_MODEL = "local/qwen3-vl-4b-instruct"
+STUDY_BUDDY_MODEL = "local/qwen3-vl-4b-instruct"
+GOOGLE_CLIENT_ID = "911372032508-7oi1o2s1o76c3uhiajj9eiuong17ulr3.apps.googleusercontent.com"
+APP_URL = "https://mednexus-cloudflare.khaledemadalmasri02.workers.dev"
+
+# Card generation tuning (optional). Concurrency = chunks generated in parallel;
+# deadlineMs = max wall-clock budget before the job aborts and returns whatever
+# cards were produced so far (prevents silent 5-minute worker timeouts).
+GEN_CONCURRENCY = "5"
+GEN_DEADLINE_MS = "240000"
+
+# Secrets are set via: wrangler secret put <NAME>
+#   OPENROUTER_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, OLLAMA_CLOUD_API_KEY,
+#   GOOGLE_CLIENT_ID, ADMIN_SECRET_KEY, APP_URL

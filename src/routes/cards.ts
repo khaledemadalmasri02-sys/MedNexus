@@ -1,136 +1,85 @@
-import { Router, Request, Response } from "express";
-import { db, cards, decks } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, inArray } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import type { Card } from "../db/schema.js";
-import { validateBody, validateParams, validateQuery } from "../middleware/validate.js";
-import {
-  createCardSchema, updateCardSchema, regenerateBatchSchema, idParamSchema, deckIdQuerySchema,
-} from "./validators.js";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { cards, decks } from "../db/index";
+import { validate, createCardSchema, updateCardSchema, regenerateBatchSchema } from "../middleware/validate";
 
-const router = Router();
+export const cardRoutes = new Hono<AppEnv>();
 
-// Get cards by deck ID
-router.get("/cards", validateQuery(deckIdQuerySchema), async (req: Request, res: Response) => {
-  const { deckId } = req.query as unknown as { deckId: number };
+function getDb(c: any): DB { return c.get("db"); }
 
+cardRoutes.get("/cards", async (c) => {
+  const deckId = parseInt(c.req.query("deckId") || "", 10);
+  if (isNaN(deckId)) return c.json({ error: { code: "VALIDATION_ERROR", message: "deckId required" } }, 400);
   try {
-    const deckCards = await db.query.cards.findMany({
-      where: eq(cards.deckId, deckId),
-    });
-    res.json(deckCards);
+    const deckCards = await getDb(c).query.cards.findMany({ where: eq(cards.deckId, deckId) });
+    return c.json(deckCards);
   } catch (err) {
-    logger.error({ err }, "Failed to get cards");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get cards" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get cards" } }, 500);
   }
 });
 
-// Create new card
-router.post("/cards", validateBody(createCardSchema), async (req: Request, res: Response) => {
-  const { deckId, front, back, cardType, tags } = req.body;
-
+cardRoutes.post("/cards", validate(createCardSchema), async (c) => {
+  const { deckId, front, back, cardType, tags } = c.get("validated") as any;
   try {
-    const deck = await db.query.decks.findFirst({
-      where: eq(decks.id, deckId),
-    });
-
-    if (!deck) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Deck not found" } });
-      return;
-    }
-
-    const [card] = await db.insert(cards).values({
-      deckId, front, back,
-      tags: tags || null,
-      cardType: cardType || "basic",
-      createdAt: new Date(),
-      updatedAt: new Date(),
+    const deck = await getDb(c).query.decks.findFirst({ where: eq(decks.id, deckId) });
+    if (!deck) return c.json({ error: { code: "NOT_FOUND", message: "Deck not found" } }, 404);
+    const [card] = await getDb(c).insert(cards).values({
+      deckId, front, back, tags: tags || null, cardType: cardType || "basic",
+      createdAt: new Date(), updatedAt: new Date(),
     }).returning();
-
-    res.status(201).json(card);
+    return c.json(card, 201);
   } catch (err) {
-    logger.error({ err }, "Failed to create card");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to create card" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to create card" } }, 500);
   }
 });
 
-// Update card
-router.patch("/cards/:id", validateParams(idParamSchema), validateBody(updateCardSchema), async (req: Request, res: Response) => {
-  const id = req.params.id as unknown as number;
-  const { front, back, tags, cardType, choices, correctIndex } = req.body;
-
+cardRoutes.patch("/cards/:id", validate(updateCardSchema), async (c) => {
+  const id = parseInt(c.req.param("id") ?? "", 10);
+  const { front, back, tags, cardType, choices, correctIndex } = c.get("validated") as any;
   try {
-    const [card] = await db.update(cards).set({
-      front: front,
-      back: back,
+    const [card] = await getDb(c).update(cards).set({
+      front, back,
       tags: tags !== undefined ? tags : undefined,
-      cardType: cardType,
+      cardType,
       choices: choices ? JSON.stringify(choices) : undefined,
-      correctIndex: correctIndex,
+      correctIndex,
       updatedAt: new Date(),
     }).where(eq(cards.id, id)).returning();
-    
-    if (!card) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Card not found" } });
-      return;
-    }
-    
-    res.json(card);
+    if (!card) return c.json({ error: { code: "NOT_FOUND", message: "Card not found" } }, 404);
+    return c.json(card);
   } catch (err) {
-    logger.error({ err }, "Failed to update card");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to update card" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to update card" } }, 500);
   }
 });
 
-// Delete card
-router.delete("/cards/:id", validateParams(idParamSchema), async (req: Request, res: Response) => {
-  const id = req.params.id as unknown as number;
-
+cardRoutes.delete("/cards/:id", async (c) => {
+  const id = parseInt(c.req.param("id") ?? "", 10);
   try {
-    const [deleted] = await db.delete(cards).where(eq(cards.id, id)).returning();
-
-    if (!deleted) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Card not found" } });
-      return;
-    }
-
-    res.status(204).send();
+    const [deleted] = await getDb(c).delete(cards).where(eq(cards.id, id)).returning();
+    if (!deleted) return c.json({ error: { code: "NOT_FOUND", message: "Card not found" } }, 404);
+    return new Response(null, { status: 204 });
   } catch (err) {
-    logger.error({ err }, "Failed to delete card");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete card" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete card" } }, 500);
   }
 });
 
-// Batch regenerate cards with AI
-router.post("/cards/regenerate-batch", validateBody(regenerateBatchSchema), async (req: Request, res: Response) => {
-  const { cardIds } = req.body;
-
+cardRoutes.post("/cards/regenerate-batch", validate(regenerateBatchSchema), async (c) => {
+  const { cardIds } = c.get("validated") as any;
   const MAX_BATCH = 10;
   const ids = cardIds.slice(0, MAX_BATCH);
-  
   try {
-    const cardsToRegenerate = await db.query.cards.findMany({
-      where: inArray(cards.id, ids),
-    });
-    
+    const cardsToRegenerate = await getDb(c).query.cards.findMany({ where: inArray(cards.id, ids) });
     if (cardsToRegenerate.length === 0) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "No cards found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "No cards found" } }, 404);
     }
-    
-    // In a real implementation, this would call an AI service
-    // For now, we'll return the original cards
-    logger.info({ count: cardsToRegenerate.length }, "Batch regenerate requested");
-    
-    res.json({
+    return c.json({
       regeneratedCount: 0,
       cards: cardsToRegenerate,
       message: "AI regeneration not configured. Add AI provider keys to enable.",
     });
   } catch (err) {
-    logger.error({ err }, "Failed to regenerate cards");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to regenerate cards" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to regenerate cards" } }, 500);
   }
 });
-
-export default router;

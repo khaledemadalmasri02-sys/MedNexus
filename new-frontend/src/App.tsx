@@ -34,6 +34,7 @@ const Exam = lazy(() => import("./pages/Exam"));
 const Summarize = lazy(() => import("./pages/Summarize"));
 const Mnemonics = lazy(() => import("./pages/Mnemonics"));
 const Coach = lazy(() => import("./pages/Coach"));
+const StudyPilot = lazy(() => import("./pages/StudyPilot"));
 const ImageAnalyze = lazy(() => import("./pages/ImageAnalyze"));
 const VoiceStudy = lazy(() => import("./pages/VoiceStudy"));
 const GroupStudy = lazy(() => import("./pages/GroupStudy"));
@@ -175,6 +176,11 @@ function AnimatedRoutes() {
           <Route path="/coach" element={
             <ErrorBoundary>
               <Suspense fallback={<PageLoader />}><Coach /></Suspense>
+            </ErrorBoundary>
+          } />
+          <Route path="/studypilot" element={
+            <ErrorBoundary>
+              <Suspense fallback={<PageLoader />}><StudyPilot /></Suspense>
             </ErrorBoundary>
           } />
           <Route path="/image-analyze" element={

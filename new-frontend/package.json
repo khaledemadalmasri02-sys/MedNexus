@@ -34,6 +34,7 @@
     "rehype-raw": "^7.0.0",
     "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.3.0",
+    "tesseract.js": "^5.1.1",
     "three": "^0.184.0"
   },
   "devDependencies": {

@@ -1,62 +1,18 @@
-import pino from "pino";
-import { getConfig } from "../config.js";
-import fs from "fs";
-import path from "path";
+// Lightweight logger for Workers (console-based; structured).
+type Fields = Record<string, unknown>;
 
-const logDir = path.dirname(getConfig().LOG_FILE_PATH);
-if (!fs.existsSync(logDir)) {
-  fs.mkdirSync(logDir, { recursive: true });
+function log(level: string, a?: Fields | string, b?: string) {
+  const obj = typeof a === "object" ? a : undefined;
+  const msg = typeof a === "string" ? a : b;
+  const line = { level, msg, ...(obj || {}), time: new Date().toISOString() };
+  if (level === "error") console.error(JSON.stringify(line));
+  else if (level === "warn") console.warn(JSON.stringify(line));
+  else console.log(JSON.stringify(line));
 }
 
-export const logger = pino({
-  level: getConfig().LOG_LEVEL,
-  transport: getConfig().NODE_ENV === "development"
-    ? {
-        target: "pino-pretty",
-        options: {
-          colorize: true,
-          translateTime: "SYS:standard",
-          ignore: "pid,hostname",
-        },
-      }
-    : undefined,
-  timestamp: pino.stdTimeFunctions.isoTime,
-  redact: {
-    paths: [
-      "req.headers.authorization",
-      "req.headers.cookie",
-      "req.headers[\"x-admin-key\"]",
-      "res.headers[\"set-cookie\"]",
-      "*.password",
-      "*.passwordHash",
-      "*.token",
-      "*.apiKey",
-      "*.api_key",
-      "*.secret",
-      "*.accessToken",
-      "*.idToken",
-      "inputData",
-      "OPENROUTER_API_KEY",
-      "OPENAI_API_KEY",
-      "GROQ_API_KEY",
-      "MISTRAL_API_KEY",
-      "GOOGLE_AI_API_KEY",
-      "SMTP_PASS",
-      "ADMIN_SECRET_KEY",
-    ],
-    censor: "[REDACTED]",
-  },
-});
-
-export const httpLogger = pino({
-  level: "info",
-  transport: {
-    target: "pino-pretty",
-    options: {
-      colorize: true,
-      translateTime: "SYS:standard",
-    },
-  },
-});
-
-export default logger;
+export const logger = {
+  debug: (a?: Fields | string, b?: string) => log("debug", a, b),
+  info: (a?: Fields | string, b?: string) => log("info", a, b),
+  warn: (a?: Fields | string, b?: string) => log("warn", a, b),
+  error: (a?: Fields | string, b?: string) => log("error", a, b),
+};

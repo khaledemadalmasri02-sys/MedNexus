@@ -39,6 +39,12 @@ export interface Card {
   explanationClinical?: string | null;
   explanationTesttrap?: string | null;
   explanationsGeneratedAt?: string | null;
+  // StudyPilot AI path
+  aiFront?: string | null;
+  aiBack?: string | null;
+  aiExplanation?: string | null;
+  aiGenerated?: boolean | null;
+  source?: "ai" | "heuristic" | null;
 }
 
 export interface QBank {
@@ -274,7 +280,7 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
-async function apiFetch<T>(
+export async function apiFetch<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
@@ -781,7 +787,7 @@ export const extractApi = {
 
 // Explain API
 export const explainApi = {
-  explain: (data: { front: string; back: string; mode?: "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap" }) =>
+  explain: (data: { front: string; back: string; mode?: "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap"; cardId?: number }) =>
     apiFetch<ExplainResponse>("/explain", {
       method: "POST",
       body: JSON.stringify(data),

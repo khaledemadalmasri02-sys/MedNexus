@@ -1,23 +1,42 @@
-import { Router, Request, Response } from "express";
-import { db, studySessions, decks } from "../db/index.js";
-import { eq, and, isNull, sql, gte, lte, desc } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import { validateBody } from "../middleware/validate.js";
-import { startStudySessionSchema, updateStudySessionSchema, endStudySessionSchema } from "./validators.js";
+import { Hono } from "hono";
+import { eq, and, isNull, sql, gte, desc } from "drizzle-orm";
+import { z } from "zod";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { studySessions, decks } from "../db/index";
+import { validate } from "../middleware/validate";
+import { logger } from "../lib/logger";
 
-const router = Router();
+export const studySessionRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+function getDb(c: any): DB { return c.get("db"); }
+function getUserId(c: any): string | null { return c.get("user")?.id ?? null; }
 
-// ── POST /api/study-sessions — start a session ──
-router.post("/", validateBody(startStudySessionSchema), async (req: Request, res: Response) => {
+const startStudySessionSchema = z.object({
+  planId: z.number().int().positive().optional(),
+  deckId: z.number().int().positive().optional(),
+});
+
+const updateStudySessionSchema = z.object({
+  cardsStudied: z.number().int().min(0).optional(),
+  knownCount: z.number().int().min(0).optional(),
+  unknownCount: z.number().int().min(0).optional(),
+});
+
+const endStudySessionSchema = z.object({
+  cardsStudied: z.number().int().min(0).optional(),
+  knownCount: z.number().int().min(0).optional(),
+  unknownCount: z.number().int().min(0).optional(),
+  focusRating: z.number().int().min(1).max(5).optional(),
+});
+
+// ── POST /api/study-sessions ──
+studySessionRoutes.post("/study-sessions", validate(startStudySessionSchema), async (c) => {
   try {
-    const userId = getUserId(req);
-    const { planId, deckId } = req.body;
+    const userId = getUserId(c);
+    const { planId, deckId } = c.get("validated") as any;
 
-    const [session] = await db.insert(studySessions).values({
+    const [session] = await getDb(c).insert(studySessions).values({
       userId,
       planId: planId || null,
       deckId: deckId || null,
@@ -26,71 +45,63 @@ router.post("/", validateBody(startStudySessionSchema), async (req: Request, res
       createdAt: new Date(),
     }).returning();
 
-    res.status(201).json(session);
+    return c.json(session, 201);
   } catch (err) {
     logger.error({ err }, "Failed to start study session");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to start study session" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to start study session" } }, 500);
   }
 });
 
-// ── PATCH /api/study-sessions/:id — update progress ──
-router.patch("/:id", validateBody(updateStudySessionSchema), async (req: Request, res: Response) => {
+// ── PATCH /api/study-sessions/:id ──
+studySessionRoutes.patch("/study-sessions/:id", validate(updateStudySessionSchema), async (c) => {
   try {
-    const userId = getUserId(req);
-    const sessionId = parseInt(req.params.id, 10);
+    const userId = getUserId(c);
+    const sessionId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(sessionId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
     }
 
-    const existing = await db.query.studySessions.findFirst({
-      where: eq(studySessions.id, sessionId),
-    });
+    const existing = await getDb(c).query.studySessions.findFirst({ where: eq(studySessions.id, sessionId) });
     if (!existing || (userId && existing.userId !== userId) || (!userId && existing.userId !== null)) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Session not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Session not found" } }, 404);
     }
 
-    const { cardsStudied, knownCount, unknownCount } = req.body;
+    const { cardsStudied, knownCount, unknownCount } = c.get("validated") as any;
 
-    const [updated] = await db.update(studySessions).set({
+    const [updated] = await getDb(c).update(studySessions).set({
       cardsStudied: cardsStudied !== undefined ? cardsStudied : existing.cardsStudied,
       knownCount: knownCount !== undefined ? knownCount : existing.knownCount,
       unknownCount: unknownCount !== undefined ? unknownCount : existing.unknownCount,
     }).where(eq(studySessions.id, sessionId)).returning();
 
-    res.json(updated);
+    return c.json(updated);
   } catch (err) {
     logger.error({ err }, "Failed to update study session");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to update study session" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to update study session" } }, 500);
   }
 });
 
 // ── POST /api/study-sessions/:id/end ──
-router.post("/:id/end", validateBody(endStudySessionSchema), async (req: Request, res: Response) => {
+studySessionRoutes.post("/study-sessions/:id/end", validate(endStudySessionSchema), async (c) => {
   try {
-    const userId = getUserId(req);
-    const sessionId = parseInt(req.params.id, 10);
+    const userId = getUserId(c);
+    const sessionId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(sessionId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
     }
 
-    const existing = await db.query.studySessions.findFirst({
-      where: eq(studySessions.id, sessionId),
-    });
+    const existing = await getDb(c).query.studySessions.findFirst({ where: eq(studySessions.id, sessionId) });
     if (!existing || (userId && existing.userId !== userId) || (!userId && existing.userId !== null)) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Session not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Session not found" } }, 404);
     }
 
     const endedAt = new Date();
     const durationMs = endedAt.getTime() - new Date(existing.startedAt).getTime();
     const durationMinutes = Math.max(1, Math.round(durationMs / 60000));
 
-    const { cardsStudied, knownCount, unknownCount, focusRating } = req.body;
+    const { cardsStudied, knownCount, unknownCount, focusRating } = c.get("validated") as any;
 
-    const [updated] = await db.update(studySessions).set({
+    const [updated] = await getDb(c).update(studySessions).set({
       endedAt,
       durationMinutes,
       cardsStudied: cardsStudied !== undefined ? cardsStudied : existing.cardsStudied,
@@ -99,24 +110,24 @@ router.post("/:id/end", validateBody(endStudySessionSchema), async (req: Request
       focusRating: focusRating !== undefined ? focusRating : existing.focusRating,
     }).where(eq(studySessions.id, sessionId)).returning();
 
-    res.json(updated);
+    return c.json(updated);
   } catch (err) {
     logger.error({ err }, "Failed to end study session");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to end study session" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to end study session" } }, 500);
   }
 });
 
 // ── GET /api/study-sessions/stats ──
-router.get("/stats", async (req: Request, res: Response) => {
+studySessionRoutes.get("/study-sessions/stats", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
 
     const now = new Date();
     const weekStart = new Date(now);
     weekStart.setDate(now.getDate() - now.getDay() + 1);
     weekStart.setHours(0, 0, 0, 0);
 
-    const sessions = await db.query.studySessions.findMany({
+    const sessions = await getDb(c).query.studySessions.findMany({
       where: and(
         userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId),
         gte(studySessions.startedAt, weekStart),
@@ -143,8 +154,8 @@ router.get("/stats", async (req: Request, res: Response) => {
       }
     }
 
-    res.json({
-      totalMinutes: totalMinutes,
+    return c.json({
+      totalMinutes,
       totalSessions,
       avgSessionMin,
       dailyBreakdown: Object.entries(dailyBreakdown).map(([date, data]) => ({
@@ -155,29 +166,29 @@ router.get("/stats", async (req: Request, res: Response) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to get study session stats");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get study session stats" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get study session stats" } }, 500);
   }
 });
 
 // ── GET /api/study-sessions/history ──
-router.get("/history", async (req: Request, res: Response) => {
+studySessionRoutes.get("/study-sessions/history", async (c) => {
   try {
-    const userId = getUserId(req);
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const userId = getUserId(c);
+    const limit = Math.min(parseInt(c.req.query("limit") as string) || 20, 100);
+    const offset = parseInt(c.req.query("offset") as string) || 0;
 
-    const sessions = await db.query.studySessions.findMany({
+    const sessions = await getDb(c).query.studySessions.findMany({
       where: userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId),
       limit,
       offset,
-      orderBy: desc(studySessions.startedAt),
+      orderBy: (studySessions, { desc: d }) => d(studySessions.startedAt),
     });
 
-    const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(studySessions).where(
+    const [countResult] = await getDb(c).select({ count: sql<number>`count(*)` }).from(studySessions).where(
       userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId),
     );
 
-    res.json({
+    return c.json({
       sessions,
       pagination: {
         total: countResult?.count || 0,
@@ -188,20 +199,20 @@ router.get("/history", async (req: Request, res: Response) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to get study session history");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get study session history" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get study session history" } }, 500);
   }
 });
 
-// ── GET /api/study-sessions/focus-average?days=120 — avg focus rating ──
-router.get("/focus-average", async (req: Request, res: Response) => {
+// ── GET /api/study-sessions/focus-average ──
+studySessionRoutes.get("/study-sessions/focus-average", async (c) => {
   try {
-    const userId = getUserId(req);
-    const days = Math.min(parseInt(req.query.days as string) || 120, 365);
+    const userId = getUserId(c);
+    const days = Math.min(parseInt(c.req.query("days") as string) || 120, 365);
     const start = new Date();
     start.setHours(0, 0, 0, 0);
     start.setDate(start.getDate() - (days - 1));
 
-    const [result] = await db
+    const [result] = await getDb(c)
       .select({
         avg: sql<number | null>`avg(${studySessions.focusRating})`,
         count: sql<number>`count(${studySessions.focusRating})`,
@@ -215,20 +226,20 @@ router.get("/focus-average", async (req: Request, res: Response) => {
         ),
       );
 
-    res.json({ average: result?.avg ?? null, count: result?.count ?? 0, days });
+    return c.json({ average: result?.avg ?? null, count: result?.count ?? 0, days });
   } catch (err) {
     logger.error({ err }, "Failed to get focus average");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get focus average" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get focus average" } }, 500);
   }
 });
 
-// ── GET /api/study-sessions/recent — recent sessions with deck names ──
-router.get("/recent", async (req: Request, res: Response) => {
+// ── GET /api/study-sessions/recent ──
+studySessionRoutes.get("/study-sessions/recent", async (c) => {
   try {
-    const userId = getUserId(req);
-    const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+    const userId = getUserId(c);
+    const limit = Math.min(parseInt(c.req.query("limit") as string) || 10, 50);
 
-    const sessions = await db.select({
+    const sessions = await getDb(c).select({
       id: studySessions.id,
       deckId: studySessions.deckId,
       deckName: decks.name,
@@ -239,29 +250,29 @@ router.get("/recent", async (req: Request, res: Response) => {
       knownCount: studySessions.knownCount,
       unknownCount: studySessions.unknownCount,
     })
-    .from(studySessions)
-    .leftJoin(decks, eq(decks.id, studySessions.deckId))
-    .where(userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId))
-    .orderBy(desc(studySessions.startedAt))
-    .limit(limit);
+      .from(studySessions)
+      .leftJoin(decks, eq(decks.id, studySessions.deckId))
+      .where(userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId))
+      .orderBy(desc(studySessions.startedAt))
+      .limit(limit);
 
-    res.json({ sessions });
+    return c.json({ sessions });
   } catch (err) {
     logger.error({ err }, "Failed to get recent sessions");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get recent sessions" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get recent sessions" } }, 500);
   }
 });
 
 // ── GET /api/study-sessions/summary ──
-router.get("/summary", async (req: Request, res: Response) => {
+studySessionRoutes.get("/study-sessions/summary", async (c) => {
   try {
-    const userId = getUserId(req);
-    const days = parseInt(req.query.days as string) || 7;
+    const userId = getUserId(c);
+    const days = parseInt(c.req.query("days") as string) || 7;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
     startDate.setHours(0, 0, 0, 0);
 
-    const sessions = await db.query.studySessions.findMany({
+    const sessions = await getDb(c).query.studySessions.findMany({
       where: and(
         userId ? eq(studySessions.userId, userId) : isNull(studySessions.userId),
         gte(studySessions.startedAt, startDate),
@@ -287,7 +298,7 @@ router.get("/summary", async (req: Request, res: Response) => {
       }
     }
 
-    res.json({
+    return c.json({
       totalMinutes,
       sessionsCount,
       dailyBreakdown: Object.entries(dailyBreakdown).map(([date, data]) => ({
@@ -298,8 +309,6 @@ router.get("/summary", async (req: Request, res: Response) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to get study session summary");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get study session summary" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get study session summary" } }, 500);
   }
 });
-
-export default router;

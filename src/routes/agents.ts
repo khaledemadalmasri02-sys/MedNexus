@@ -1,18 +1,22 @@
-import { Router, Request, Response } from "express";
-import { getConfig } from "../config.js";
-import { db, chatMessages, agentUsage, decks, cards, cardProgress, studySessions, userSettings, exams, groupStudyRooms } from "../db/index.js";
-import { eq, and, gte, lte, inArray, desc, sql } from "drizzle-orm";
-import { aiService } from "../lib/ai.js";
-import { logger } from "../lib/logger.js";
-import { requireAuth } from "../middleware/auth.js";
-import { uploadImage } from "../middleware/upload.js";
-import crypto from "crypto";
-import { getCachedResponse, storeCachedResponse, searchKnowledge } from "../lib/agent-cache.js";
+import { Hono } from "hono";
+import { eq, and, gte, lte, inArray, desc, sql, gt } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import {
+  chatMessages, agentUsage, decks, cards, cardProgress, studySessions,
+  exams, groupStudyRooms, agentKnowledge, agentResponseCache, agentCacheAnalytics,
+} from "../db/index";
+import { getDb, getUserId, readJson, unauthorized, serverError } from "../lib/helpers";
+import { createAIService } from "../lib/ai";
+import { getConfig } from "../lib/config";
 
-const router = Router();
+export const agentRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string {
-  return req.user!.id;
+function aiAvailable(c: any): boolean {
+  try {
+    return createAIService(c.env).hasAnyProvider();
+  } catch {
+    return false;
+  }
 }
 
 function parseTags(raw: string | null | undefined): string[] {
@@ -20,11 +24,11 @@ function parseTags(raw: string | null | undefined): string[] {
   try {
     return JSON.parse(raw);
   } catch {
-    return raw.split(",").map(t => t.trim()).filter(Boolean);
+    return raw.split(",").map((t) => t.trim()).filter(Boolean);
   }
 }
 
-function trackUsage(userId: string, agentId: string, tokensUsed: number, durationMs: number, success: boolean) {
+function trackUsage(db: any, userId: string, agentId: string, tokensUsed: number, durationMs: number, success: boolean) {
   db.insert(agentUsage).values({
     userId,
     agentId,
@@ -35,18 +39,173 @@ function trackUsage(userId: string, agentId: string, tokensUsed: number, duratio
   }).catch(() => {});
 }
 
-function isEnabled(req: Request, setting: string): boolean {
-  return (req.user as any)?.[setting] !== false;
+// ---- Inline agent cache (replaces lib/agent-cache.ts; uses D1 tables) ----
+
+function normalize(q: string): string {
+  return q.toLowerCase().trim().replace(/[?!.,;:'"]/g, "").replace(/\s+/g, " ");
 }
 
-router.post("/chat", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { message, deckId, mode } = req.body as { message: string; deckId?: number; mode?: string };
+async function hash(q: string): Promise<string> {
+  const data = new TextEncoder().encode(normalize(q));
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function tokenize(q: string): string[] {
+  return normalize(q).split(/\s+/).filter((w) => w.length > 2);
+}
+
+async function trackAnalytics(db: any, agentId: string, type: string) {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const existing = await db.query.agentCacheAnalytics.findFirst({
+      where: and(eq(agentCacheAnalytics.agentId, agentId), eq(agentCacheAnalytics.date, today)),
+    });
+    if (existing) {
+      const u: any = { totalQuestions: sql`${agentCacheAnalytics.totalQuestions} + 1` };
+      if (type === "memory_hit") u.memoryHits = sql`${agentCacheAnalytics.memoryHits} + 1`;
+      if (type === "knowledge_hit") u.knowledgeHits = sql`${agentCacheAnalytics.knowledgeHits} + 1`;
+      if (type === "db_cache_hit") u.dbCacheHits = sql`${agentCacheAnalytics.dbCacheHits} + 1`;
+      if (type === "miss") u.apiCalls = sql`${agentCacheAnalytics.apiCalls} + 1`;
+      await db.update(agentCacheAnalytics).set(u).where(eq(agentCacheAnalytics.id, existing.id));
+    } else {
+      await db.insert(agentCacheAnalytics).values({
+        agentId,
+        date: today,
+        totalQuestions: 1,
+        memoryHits: type === "memory_hit" ? 1 : 0,
+        knowledgeHits: type === "knowledge_hit" ? 1 : 0,
+        dbCacheHits: type === "db_cache_hit" ? 1 : 0,
+        apiCalls: type === "miss" ? 1 : 0,
+      });
+    }
+  } catch { /* ignore analytics errors */ }
+}
+
+async function searchKnowledgeBase(db: any, agentId: string, question: string): Promise<{ answer: string } | null> {
+  const keywords = tokenize(question);
+  if (keywords.length === 0) return null;
+  const entries = await db.query.agentKnowledge.findMany({
+    where: and(eq(agentKnowledge.agentId, agentId), eq(agentKnowledge.isActive, true)),
+    orderBy: [desc(agentKnowledge.priority)],
+    limit: 20,
+  });
+  let bestMatch: { answer: string; score: number } | null = null;
+  for (const entry of entries) {
+    let score = 0;
+    let entryKeywords: string[] = [];
+    try { entryKeywords = JSON.parse(entry.keywords as string); } catch { entryKeywords = []; }
+    for (const kw of keywords) {
+      for (const ekw of entryKeywords) {
+        if (ekw.includes(kw) || kw.includes(ekw)) score += 5;
+      }
+    }
+    score += (entry.priority || 0) * 0.3;
+    if (score > 8 && (!bestMatch || score > bestMatch.score)) bestMatch = { answer: entry.answer, score };
+  }
+  return bestMatch ? { answer: bestMatch.answer } : null;
+}
+
+async function getCachedResponse(db: any, agentId: string, question: string): Promise<{ answer: string; source: "knowledge" | "ai"; confidence: number } | null> {
+  const hashKey = await hash(question);
+
+  const knowledgeHit = await searchKnowledgeBase(db, agentId, question);
+  if (knowledgeHit) {
+    await trackAnalytics(db, agentId, "knowledge_hit");
+    return { answer: knowledgeHit.answer, source: "knowledge", confidence: 0.95 };
+  }
+
+  const dbEntry = await db.query.agentResponseCache.findFirst({
+    where: and(
+      eq(agentResponseCache.agentId, agentId),
+      eq(agentResponseCache.questionHash, hashKey),
+      gt(agentResponseCache.expiresAt, new Date()),
+    ),
+  });
+  if (dbEntry) {
+    await db.update(agentResponseCache).set({ hitCount: sql`${agentResponseCache.hitCount} + 1`, lastHitAt: new Date() }).where(eq(agentResponseCache.id, dbEntry.id));
+    await trackAnalytics(db, agentId, "db_cache_hit");
+    return { answer: dbEntry.answer, source: "ai", confidence: dbEntry.confidence };
+  }
+
+  await trackAnalytics(db, agentId, "miss");
+  return null;
+}
+
+async function storeCachedResponse(db: any, agentId: string, question: string, answer: string, source: "ai" | "knowledge" = "ai", confidence: number = 0.8) {
+  const hashKey = await hash(question);
+  const now = new Date();
+  const expires = new Date(now.getTime() + 86400000);
+  try {
+    await db.insert(agentResponseCache).values({
+      agentId,
+      questionHash: hashKey,
+      questionOriginal: question.substring(0, 500),
+      answer,
+      source,
+      confidence,
+      expiresAt: expires,
+    });
+  } catch {
+    await db.update(agentResponseCache).set({ answer, hitCount: 1, lastHitAt: now, expiresAt: expires }).where(
+      and(eq(agentResponseCache.agentId, agentId), eq(agentResponseCache.questionHash, hashKey)),
+    );
+  }
+}
+
+async function searchKnowledge(db: any, agentId: string, query: string, limit = 5) {
+  const keywords = tokenize(query);
+  const entries = await db.query.agentKnowledge.findMany({
+    where: and(eq(agentKnowledge.agentId, agentId), eq(agentKnowledge.isActive, true)),
+    orderBy: [desc(agentKnowledge.priority)],
+    limit: 20,
+  });
+  return entries.map((entry: any) => {
+    let entryKeywords: string[] = [];
+    try { entryKeywords = JSON.parse(entry.keywords as string); } catch { entryKeywords = []; }
+    let score = 0;
+    for (const kw of keywords) {
+      for (const ekw of entryKeywords) {
+        if (ekw.includes(kw) || kw.includes(ekw)) score += 5;
+      }
+    }
+    score += (entry.priority || 0) * 0.3;
+    return { id: entry.id, question: entry.question, answer: entry.answer, category: entry.category, score };
+  }).filter((s: any) => s.score > 3).sort((a: any, b: any) => b.score - a.score).slice(0, limit);
+}
+
+// ---- Routes ----
+
+// POST /api/agents/chat
+agentRoutes.post("/agents/chat", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { message, deckId, mode } = body as { message?: string; deckId?: number; mode?: string };
   const startTime = Date.now();
 
   if (!message) {
-    res.status(400).json({ error: { code: "INVALID_INPUT", message: "Message is required" } });
-    return;
+    return c.json({ error: { code: "INVALID_INPUT", message: "Message is required" } }, 400);
+  }
+
+  if (!aiAvailable(c)) {
+    const encoder = new TextEncoder();
+    const message = "The AI Study Buddy requires an API key to be configured. Set OPENROUTER_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, or GOOGLE_AI_API_KEY in your wrangler env to enable responses.";
+    const s = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: message })}\n\n`));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return new Response(s, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
   }
 
   const chatMode = mode === "brief" ? "brief" : "academic";
@@ -68,7 +227,7 @@ router.post("/chat", requireAuth, async (req: Request, res: Response) => {
     });
 
     if (recentSessions.length > 0) {
-      deckContext += `\n\nRecent study activity: ${recentSessions.map(s => `${s.cardsStudied} cards studied`).join(", ")}`;
+      deckContext += `\n\nRecent study activity: ${recentSessions.map((s: any) => `${s.cardsStudied} cards studied`).join(", ")}`;
     }
 
     const recentCards = await db.query.cards.findMany({
@@ -79,19 +238,30 @@ router.post("/chat", requireAuth, async (req: Request, res: Response) => {
 
     let cardContext = "";
     if (recentCards.length > 0) {
-      cardContext = "\n\nRelevant cards from user's collection:\n" + recentCards.map(c => `Q: ${c.front}\nA: ${c.back}`).join("\n\n");
+      cardContext = "\n\nRelevant cards from user's collection:\n" + recentCards.map((crd: any) => `Q: ${crd.front}\nA: ${crd.back}`).join("\n\n");
     }
 
     await db.insert(chatMessages).values({ userId, role: "user", content: message, deckContext: deckId ? String(deckId) : null, createdAt: new Date() });
-    logger.debug({ msg: "chat msg inserted" });
 
-    const cached = await getCachedResponse("study-buddy", message);
-    logger.debug({ msg: "cache checked", cached: !!cached });
+    const cached = await getCachedResponse(db, "study-buddy", message);
     if (cached) {
       await db.insert(chatMessages).values({ userId, role: "assistant", content: cached.answer, deckContext: deckId ? String(deckId) : null, createdAt: new Date() });
-      trackUsage(userId, "study-buddy", 0, Date.now() - startTime, true);
-      res.json({ answer: cached.answer, source: cached.source, cached: true });
-      return;
+      trackUsage(db, userId, "study-buddy", 0, Date.now() - startTime, true);
+      const cachedEncoder = new TextEncoder();
+      const cachedStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(cachedEncoder.encode(`data: ${JSON.stringify({ chunk: cached.answer })}\n\n`));
+          controller.enqueue(cachedEncoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(cachedStream, {
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
     }
 
     const modeInstruction = chatMode === "brief"
@@ -109,74 +279,110 @@ router.post("/chat", requireAuth, async (req: Request, res: Response) => {
 
 You are NOT a general support chatbot. You are a medical education tutor. Always answer medical and educational questions helpfully and thoroughly.${modeInstruction}${deckContext}${cardContext}`;
 
-    const maxTokens = chatMode === "brief" ? 384 : 1024;
+    const maxTokens = chatMode === "brief" ? 1024 : 8192;
 
-    const knowledgeEntries = await searchKnowledge("study-buddy", message, 3);
+    const knowledgeEntries = await searchKnowledge(db, "study-buddy", message, 3);
     const knowledgeContext = knowledgeEntries.length > 0
-      ? "\n\nRelevant reference material:\n" + knowledgeEntries.map(e => `Q: ${e.question}\nA: ${e.answer}`).join("\n\n")
+      ? "\n\nRelevant reference material:\n" + knowledgeEntries.map((e: any) => `Q: ${e.question}\nA: ${e.answer}`).join("\n\n")
       : "";
 
-    const stream = aiService.streamComplete([
+    const ai = createAIService(c.env);
+    const stream = ai.streamComplete([
       { role: "system", content: systemPrompt + knowledgeContext },
       { role: "user", content: message },
-    ], { model: getConfig().STUDY_BUDDY_MODEL, maxTokens: maxTokens, temperature: 0.7 });
+    ], { model: getConfig(c.env).STUDY_BUDDY_MODEL, maxTokens: maxTokens, temperature: 0.7 });
 
-    let fullResponse = "";
-    try {
-      for await (const chunk of stream) {
-        fullResponse += chunk;
-        res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
-      }
-      res.write(`data: [DONE]\n\n`);
-      await storeCachedResponse("study-buddy", message, fullResponse, "ai", 0.8);
-      await db.insert(chatMessages).values({ userId, role: "assistant", content: fullResponse, deckContext: deckId ? String(deckId) : null, createdAt: new Date() });
-      trackUsage(userId, "study-buddy", 0, Date.now() - startTime, true);
-    } catch (streamErr) {
-      logger.error({ err: streamErr }, "Chat stream error");
-      trackUsage(userId, "study-buddy", 0, Date.now() - startTime, false);
-      res.write(`data: ${JSON.stringify({ error: "Stream interrupted" })}\n\n`);
-    }
-    res.end();
+    const encoder = new TextEncoder();
+    const s = new ReadableStream({
+      async start(controller) {
+        let fullResponse = "";
+        try {
+          for await (const chunk of stream) {
+            fullResponse += chunk;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk })}\n\n`));
+          }
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          await storeCachedResponse(db, "study-buddy", message, fullResponse, "ai", 0.8);
+          await db.insert(chatMessages).values({ userId, role: "assistant", content: fullResponse, deckContext: deckId ? String(deckId) : null, createdAt: new Date() });
+          trackUsage(db, userId, "study-buddy", 0, Date.now() - startTime, true);
+        } catch (err) {
+          trackUsage(db, userId, "study-buddy", 0, Date.now() - startTime, false);
+          const reason = err instanceof Error ? err.message : String(err);
+          const lower = reason.toLowerCase();
+          let message = "The AI service is unavailable right now (check your API key / quota).";
+          if (lower.includes("rate limit") || lower.includes("429")) {
+            message = "OpenRouter free-tier daily request limit reached. Add credits at openrouter.ai to raise the limit (or wait for the daily reset).";
+          } else if (lower.includes("quota") || lower.includes("402") || lower.includes("payment")) {
+            message = "OpenRouter quota/credit limit reached. Please add credits to your OpenRouter account.";
+          } else if (lower.includes("401") || lower.includes("unauthorized") || lower.includes("api key") || lower.includes("no api key")) {
+            message = "The AI provider rejected the API key. Please check your OPENROUTER_API_KEY.";
+          } else if (lower.includes("timed out")) {
+            message = "The AI service took too long to respond. Please try again.";
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: message })}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(s, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
   } catch (err) {
-    logger.error({ err }, "Chat endpoint error");
-    trackUsage(userId, "study-buddy", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Chat failed" } });
+    trackUsage(db, userId, "study-buddy", 0, Date.now() - startTime, false);
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Chat failed" } }, 500);
   }
 });
 
-router.get("/chat/history", requireAuth, async (req: Request, res: Response) => {
+// GET /api/agents/chat/history
+agentRoutes.get("/agents/chat/history", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const userId = getUserId(req);
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
-    const before = req.query.before ? new Date(req.query.before as string) : new Date();
+    const db = getDb(c);
+    const limit = Math.min(parseInt(c.req.query("limit") || "") || 50, 100);
+    const beforeParam = c.req.query("before");
+    const before = beforeParam ? new Date(beforeParam) : new Date();
+    const beforeDate = isNaN(before.getTime()) ? new Date() : before;
 
     const messages = await db.query.chatMessages.findMany({
-      where: and(eq(chatMessages.userId, userId), lte(chatMessages.createdAt, before)),
+      where: and(eq(chatMessages.userId, userId), lte(chatMessages.createdAt, beforeDate)),
       orderBy: [desc(chatMessages.createdAt)],
       limit,
     });
 
-    res.json({ messages: messages.reverse() });
+    return c.json({ messages: messages.reverse() });
   } catch (err) {
-    logger.error({ err }, "Chat history error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get chat history" } });
+    return serverError(c, "Failed to get chat history");
   }
 });
 
-router.delete("/chat/history", requireAuth, async (req: Request, res: Response) => {
+// DELETE /api/agents/chat/history
+agentRoutes.delete("/agents/chat/history", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const userId = getUserId(req);
+    const db = getDb(c);
     await db.delete(chatMessages).where(eq(chatMessages.userId, userId));
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
-    logger.error({ err }, "Chat clear error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to clear chat" } });
+    return serverError(c, "Failed to clear chat");
   }
 });
 
-router.post("/smart-review", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { deckId, count = 30 } = req.body as { deckId?: number; count?: number };
+// POST /api/agents/smart-review
+agentRoutes.post("/agents/smart-review", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { deckId, count = 30 } = body as { deckId?: number; count?: number };
   const startTime = Date.now();
 
   try {
@@ -188,7 +394,7 @@ router.post("/smart-review", requireAuth, async (req: Request, res: Response) =>
     const deckFilter = deckId ? eq(cards.deckId, deckId) : undefined;
     const allCards = await db.query.cards.findMany({ where: deckFilter });
 
-    const cardProgressMap = new Map<number, { known: number; unknown: number; total: number }>();
+    const cardProgressMap = new Map<number, { known: number; unknown: number; total: number; lastStudiedAt: Date | null }>();
     for (const card of allCards) {
       const progress = await db.query.cardProgress.findFirst({
         where: and(eq(cardProgress.cardId, card.id), eq(cardProgress.userId, userId)),
@@ -198,6 +404,7 @@ router.post("/smart-review", requireAuth, async (req: Request, res: Response) =>
           known: progress.knownCount,
           unknown: progress.unknownCount,
           total: progress.totalStudiedCount,
+          lastStudiedAt: progress.lastStudiedAt,
         });
       }
     }
@@ -214,21 +421,21 @@ router.post("/smart-review", requireAuth, async (req: Request, res: Response) =>
         if (progress.total >= 3 && ratio < 0.7) atRiskCards.push({ ...card, reason: "Needs reinforcement", score: ratio });
       }
       if (progress) {
-        const daysSinceStudy = (Date.now() - (progress as any).lastStudiedAt) / 86400000;
+        const daysSinceStudy = progress.lastStudiedAt ? (Date.now() - new Date(progress.lastStudiedAt as any).getTime()) / 86400000 : 0;
         if (daysSinceStudy > 7) overdueCards.push({ ...card, reason: `Not studied recently`, score: 0.5 });
       }
     }
 
     const prioritized = [
-      ...weakCards.sort((a, b) => a.score - b.score),
-      ...atRiskCards.filter(c => !weakCards.find(w => w.id === c.id)),
-      ...overdueCards.filter(c => !weakCards.find(w => w.id === c.id) && !atRiskCards.find(a => a.id === c.id)),
+      ...weakCards.sort((a: any, b: any) => a.score - b.score),
+      ...atRiskCards.filter((crd: any) => !weakCards.find((w: any) => w.id === crd.id)),
+      ...overdueCards.filter((crd: any) => !weakCards.find((w: any) => w.id === crd.id) && !atRiskCards.find((a: any) => a.id === crd.id)),
     ].slice(0, count);
 
     if (prioritized.length < count) {
-      const existingIds = new Set(prioritized.map(c => c.id));
-      const remaining = allCards.filter(c => !existingIds.has(c.id)).slice(0, count - prioritized.length);
-      prioritized.push(...remaining.map(c => ({ ...c, reason: "New card", score: 0.5 })));
+      const existingIds = new Set(prioritized.map((crd: any) => crd.id));
+      const remaining = allCards.filter((crd: any) => !existingIds.has(crd.id)).slice(0, count - prioritized.length);
+      prioritized.push(...remaining.map((crd: any) => ({ ...crd, reason: "New card", score: 0.5 })));
     }
 
     const tagCounts: Record<string, { total: number; weak: number }> = {};
@@ -247,14 +454,13 @@ router.post("/smart-review", requireAuth, async (req: Request, res: Response) =>
 
     const focusAreas = Object.entries(tagCounts)
       .filter(([, v]) => v.weak > 0)
-      .sort((a, b) => b[1].weak - a[1].weak)
+      .sort((a: any, b: any) => b[1].weak - a[1].weak)
       .slice(0, 5)
       .map(([tag]) => tag);
 
     const reasoning = `Analyzed ${sessions.length} study sessions over the last 30 days. Found ${weakCards.length} weak cards (below 50% accuracy), ${overdueCards.length} overdue cards, and ${atRiskCards.length} at-risk cards. Generated a targeted review of ${prioritized.length} cards.`;
-
-    trackUsage(userId, "smart-review", 0, Date.now() - startTime, true);
-    res.json({
+    trackUsage(db, userId, "smart-review", 0, Date.now() - startTime, true);
+    return c.json({
       cards: prioritized,
       reasoning,
       focusAreas,
@@ -268,33 +474,34 @@ router.post("/smart-review", requireAuth, async (req: Request, res: Response) =>
       },
     });
   } catch (err) {
-    logger.error({ err }, "Smart review error");
-    trackUsage(userId, "smart-review", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Smart review failed" } });
+    trackUsage(db, userId, "smart-review", 0, Date.now() - startTime, false);
+    return serverError(c, "Smart review failed");
   }
 });
 
-router.post("/deck-doctor", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { deckId } = req.body as { deckId: number };
+// POST /api/agents/deck-doctor
+agentRoutes.post("/agents/deck-doctor", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { deckId } = body as { deckId: number };
   const startTime = Date.now();
 
   if (!deckId) {
-    res.status(400).json({ error: { code: "INVALID_INPUT", message: "deckId is required" } });
-    return;
+    return c.json({ error: { code: "INVALID_INPUT", message: "deckId is required" } }, 400);
   }
 
   try {
     const deckCards = await db.query.cards.findMany({ where: eq(cards.deckId, deckId) });
     if (deckCards.length === 0) {
-      res.json({ healthScore: 100, issues: [], fixes: [], message: "Deck is empty" });
-      return;
+      return c.json({ healthScore: 100, issues: [], fixes: [], message: "Deck is empty" });
     }
 
     const issues: any[] = [];
     const fixes: any[] = [];
 
-    const fronts = deckCards.map(c => c.front.toLowerCase().trim());
+    const fronts = deckCards.map((crd: any) => crd.front.toLowerCase().trim());
     for (let i = 0; i < deckCards.length; i++) {
       for (let j = i + 1; j < deckCards.length; j++) {
         const a = fronts[i];
@@ -373,35 +580,39 @@ router.post("/deck-doctor", requireAuth, async (req: Request, res: Response) => 
     const maxIssues = deckCards.length * 2;
     const healthScore = Math.max(0, Math.round(100 - (totalIssues / maxIssues) * 100));
 
-    trackUsage(userId, "deck-doctor", 0, Date.now() - startTime, true);
-    res.json({ healthScore, issues, fixes, totalCards: deckCards.length });
+    trackUsage(db, userId, "deck-doctor", 0, Date.now() - startTime, true);
+    return c.json({ healthScore, issues, fixes, totalCards: deckCards.length });
   } catch (err) {
-    logger.error({ err }, "Deck doctor error");
-    trackUsage(userId, "deck-doctor", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Deck doctor failed" } });
+    trackUsage(db, userId, "deck-doctor", 0, Date.now() - startTime, false);
+    return serverError(c, "Deck doctor failed");
   }
 });
 
-router.post("/deck-doctor/fix", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { cardId, fixType, relatedCardId } = req.body as { cardId: number; fixType: string; relatedCardId?: number };
+// POST /api/agents/deck-doctor/fix
+agentRoutes.post("/agents/deck-doctor/fix", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { cardId, fixType, relatedCardId } = body as { cardId: number; fixType: string; relatedCardId?: number };
   const startTime = Date.now();
 
   try {
     const card = await db.query.cards.findFirst({ where: eq(cards.id, cardId) });
     if (!card) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Card not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Card not found" } }, 404);
     }
 
     let result: any = {};
 
+    const ai = createAIService(c.env);
+
     if (fixType === "generate_explanation") {
-      const explanation = await aiService.explainCard(card.front, card.back, "full");
+      const explanation = await ai.explainCard(card.front, card.back, "full");
       await db.update(cards).set({ explanationFull: explanation, updatedAt: new Date() }).where(eq(cards.id, cardId));
       result = { explanation };
     } else if (fixType === "rewrite") {
-      const improved = await aiService.complete([
+      const improved = await ai.complete([
         { role: "system", content: "Rewrite this flashcard to be more specific and educational. Return JSON: {front, back}" },
         { role: "user", content: `Front: ${card.front}\nBack: ${card.back}` },
       ]);
@@ -414,7 +625,7 @@ router.post("/deck-doctor/fix", requireAuth, async (req: Request, res: Response)
     } else if (fixType === "merge" && relatedCardId) {
       const related = await db.query.cards.findFirst({ where: eq(cards.id, relatedCardId) });
       if (related) {
-        const merged = await aiService.complete([
+        const merged = await ai.complete([
           { role: "system", content: "Merge these two flashcards into one comprehensive card. Return JSON: {front, back}" },
           { role: "user", content: `Card 1 - Front: ${related.front}\nBack: ${related.back}\n\nCard 2 - Front: ${card.front}\nBack: ${card.back}` },
         ]);
@@ -427,7 +638,7 @@ router.post("/deck-doctor/fix", requireAuth, async (req: Request, res: Response)
         }
       }
     } else if (fixType === "add_clinical_vignette") {
-      const vignette = await aiService.complete([
+      const vignette = await ai.complete([
         { role: "system", content: "Rewrite this flashcard's front as a clinical vignette (patient scenario). Keep the same answer. Return JSON: {front, back}" },
         { role: "user", content: `Front: ${card.front}\nBack: ${card.back}` },
       ]);
@@ -439,25 +650,30 @@ router.post("/deck-doctor/fix", requireAuth, async (req: Request, res: Response)
       }
     }
 
-    trackUsage(userId, "deck-doctor-fix", 0, Date.now() - startTime, true);
-    res.json({ success: true, result });
+    trackUsage(db, userId, "deck-doctor-fix", 0, Date.now() - startTime, true);
+    return c.json({ success: true, result });
   } catch (err) {
-    logger.error({ err }, "Deck doctor fix error");
-    trackUsage(userId, "deck-doctor-fix", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Fix failed" } });
+    trackUsage(db, userId, "deck-doctor-fix", 0, Date.now() - startTime, false);
+    return serverError(c, "Fix failed");
   }
 });
 
-router.post("/generate-exam", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { deckIds, questionCount = 50, durationMinutes = 60, title } = req.body as {
+// POST /api/agents/generate-exam
+agentRoutes.post("/agents/generate-exam", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  if (!aiAvailable(c)) {
+    return c.json({ error: { code: "AI_UNAVAILABLE", message: "AI features require a configured API key (set OPENROUTER_API_KEY or another provider key in wrangler env)." } }, 503);
+  }
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { deckIds, questionCount = 50, durationMinutes = 60, title } = body as {
     deckIds: number[]; questionCount?: number; durationMinutes?: number; title?: string;
   };
   const startTime = Date.now();
 
   if (!deckIds || deckIds.length === 0) {
-    res.status(400).json({ error: { code: "INVALID_INPUT", message: "deckIds are required" } });
-    return;
+    return c.json({ error: { code: "INVALID_INPUT", message: "deckIds are required" } }, 400);
   }
 
   try {
@@ -466,16 +682,16 @@ router.post("/generate-exam", requireAuth, async (req: Request, res: Response) =
     });
 
     if (deckCards.length === 0) {
-      res.status(400).json({ error: { code: "NO_CARDS", message: "No cards found in selected decks" } });
-      return;
+      return c.json({ error: { code: "NO_CARDS", message: "No cards found in selected decks" } }, 400);
     }
 
     const sampleCards = deckCards.sort(() => Math.random() - 0.5).slice(0, Math.min(30, deckCards.length));
-    const cardContent = sampleCards.map(c => `Q: ${c.front}\nA: ${c.back}`).join("\n\n");
+    const cardContent = sampleCards.map((crd: any) => `Q: ${crd.front}\nA: ${crd.back}`).join("\n\n");
 
     const examTitle = title || `Mock Exam - ${new Date().toLocaleDateString()}`;
 
-    const response = await aiService.complete([
+    const ai = createAIService(c.env);
+    const response = await ai.complete([
       {
         role: "system",
         content: `You are a medical exam creator. Generate ${questionCount} high-quality MCQs based on the provided study material.
@@ -498,7 +714,7 @@ Return ONLY a valid JSON array:
     }
 
     const questions = JSON.parse(jsonMatch[0]);
-    await storeCachedResponse("exam-simulator", `exam:${deckIds.sort().join(",")}:${questionCount}`, JSON.stringify(questions), "ai", 0.8);
+    await storeCachedResponse(db, "exam-simulator", `exam:${deckIds.sort().join(",")}:${questionCount}`, JSON.stringify(questions), "ai", 0.8);
     const [exam] = await db.insert(exams).values({
       userId,
       title: examTitle,
@@ -506,53 +722,58 @@ Return ONLY a valid JSON array:
       questions: JSON.stringify(questions),
       totalQuestions: questions.length,
       durationMinutes,
-      createdAt: new Date(),
     }).returning();
 
-    trackUsage(userId, "exam-simulator", 0, Date.now() - startTime, true);
-    res.json({ exam: { ...exam, questions }, message: `Generated exam with ${questions.length} questions` });
+    trackUsage(db, userId, "exam-simulator", 0, Date.now() - startTime, true);
+    return c.json({ exam: { ...exam, questions }, message: `Generated exam with ${questions.length} questions` });
   } catch (err) {
-    logger.error({ err }, "Exam generation error");
-    trackUsage(userId, "exam-simulator", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Exam generation failed" } });
+    trackUsage(db, userId, "exam-simulator", 0, Date.now() - startTime, false);
+    return serverError(c, "Exam generation failed");
   }
 });
 
-router.get("/exams", requireAuth, async (req: Request, res: Response) => {
+// GET /api/agents/exams
+agentRoutes.get("/agents/exams", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const userId = getUserId(req);
+    const db = getDb(c);
     const examList = await db.query.exams.findMany({
       where: eq(exams.userId, userId),
       orderBy: [desc(exams.createdAt)],
     });
-    res.json({ exams: examList.map(e => ({ ...e, questions: undefined })) });
+    return c.json({ exams: examList.map((e: any) => ({ ...e, questions: undefined })) });
   } catch (err) {
-    logger.error({ err }, "List exams error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list exams" } });
+    return serverError(c, "Failed to list exams");
   }
 });
 
-router.get("/exams/:id", requireAuth, async (req: Request, res: Response) => {
+// GET /api/agents/exams/:id
+agentRoutes.get("/agents/exams/:id", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const userId = getUserId(req);
+    const db = getDb(c);
     const exam = await db.query.exams.findFirst({
-      where: and(eq(exams.id, parseInt(req.params.id)), eq(exams.userId, userId)),
+      where: and(eq(exams.id, parseInt(c.req.param("id") || "", 10)), eq(exams.userId, userId)),
     });
     if (!exam) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Exam not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Exam not found" } }, 404);
     }
-    res.json({ exam });
+    return c.json({ exam });
   } catch (err) {
-    logger.error({ err }, "Get exam error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get exam" } });
+    return serverError(c, "Failed to get exam");
   }
 });
 
-router.post("/exams/:id/submit", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const examId = parseInt(req.params.id);
-  const { answers } = req.body as { answers: Record<number, number> };
+// POST /api/agents/exams/:id/submit
+agentRoutes.post("/agents/exams/:id/submit", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
+  const examId = parseInt(c.req.param("id") || "", 10);
+  const body = await readJson(c);
+  const { answers } = body as { answers: Record<number, number> };
   const startTime = Date.now();
 
   try {
@@ -560,8 +781,7 @@ router.post("/exams/:id/submit", requireAuth, async (req: Request, res: Response
       where: and(eq(exams.id, examId), eq(exams.userId, userId)),
     });
     if (!exam) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Exam not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Exam not found" } }, 404);
     }
 
     const questions = JSON.parse(exam.questions);
@@ -601,41 +821,46 @@ router.post("/exams/:id/submit", requireAuth, async (req: Request, res: Response
       completedAt: new Date(),
     }).where(eq(exams.id, examId));
 
-    trackUsage(userId, "exam-submit", 0, Date.now() - startTime, true);
-    res.json({
+    trackUsage(db, userId, "exam-submit", 0, Date.now() - startTime, true);
+    return c.json({
       score,
       correct,
       total: questions.length,
       results,
       topicBreakdown,
-      weakTopics: topicBreakdown.filter(t => t.percentage < 50).map(t => t.topic),
+      weakTopics: topicBreakdown.filter((t: any) => t.percentage < 50).map((t: any) => t.topic),
     });
   } catch (err) {
-    logger.error({ err }, "Exam submit error");
-    trackUsage(userId, "exam-submit", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to submit exam" } });
+    trackUsage(db, userId, "exam-submit", 0, Date.now() - startTime, false);
+    return serverError(c, "Failed to submit exam");
   }
 });
 
-router.post("/summarize", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { content, fileName } = req.body as { content: string; fileName?: string };
+// POST /api/agents/summarize
+agentRoutes.post("/agents/summarize", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  if (!aiAvailable(c)) {
+    return c.json({ error: { code: "AI_UNAVAILABLE", message: "AI features require a configured API key (set OPENROUTER_API_KEY or another provider key in wrangler env)." } }, 503);
+  }
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { content, fileName } = body as { content?: string; fileName?: string };
   const startTime = Date.now();
 
   if (!content) {
-    res.status(400).json({ error: { code: "INVALID_INPUT", message: "Content is required" } });
-    return;
+    return c.json({ error: { code: "INVALID_INPUT", message: "Content is required" } }, 400);
   }
 
   try {
-    const cached = await getCachedResponse("content-summarizer", content);
+    const cached = await getCachedResponse(db, "content-summarizer", content);
     if (cached) {
-      trackUsage(userId, "content-summarizer", 0, Date.now() - startTime, true);
-      res.json({ summary: JSON.parse(cached.answer), source: "knowledge", cached: true });
-      return;
+      trackUsage(db, userId, "content-summarizer", 0, Date.now() - startTime, true);
+      return c.json({ summary: JSON.parse(cached.answer), source: "knowledge", cached: true });
     }
 
-    const response = await aiService.complete([
+    const ai = createAIService(c.env);
+    const response = await ai.complete([
       {
         role: "system",
         content: `You are a medical education content summarizer. Transform the provided content into structured study notes.
@@ -651,19 +876,25 @@ Return ONLY valid JSON:
     }
 
     const summary = JSON.parse(jsonMatch[0]);
-    await storeCachedResponse("content-summarizer", content, JSON.stringify(summary), "ai", 0.8);
-    trackUsage(userId, "content-summarizer", 0, Date.now() - startTime, true);
-    res.json({ summary });
+    await storeCachedResponse(db, "content-summarizer", content, JSON.stringify(summary), "ai", 0.8);
+    trackUsage(db, userId, "content-summarizer", 0, Date.now() - startTime, true);
+    return c.json({ summary });
   } catch (err) {
-    logger.error({ err }, "Summarize error");
-    trackUsage(userId, "content-summarizer", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Summarization failed" } });
+    trackUsage(db, userId, "content-summarizer", 0, Date.now() - startTime, false);
+    return serverError(c, "Summarization failed");
   }
 });
 
-router.post("/mnemonics", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { concept, cardIds, deckId } = req.body as { concept?: string; cardIds?: number[]; deckId?: number };
+// POST /api/agents/mnemonics
+agentRoutes.post("/agents/mnemonics", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  if (!aiAvailable(c)) {
+    return c.json({ error: { code: "AI_UNAVAILABLE", message: "AI features require a configured API key (set OPENROUTER_API_KEY or another provider key in wrangler env)." } }, 503);
+  }
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { concept, cardIds, deckId } = body as { concept?: string; cardIds?: number[]; deckId?: number };
   const startTime = Date.now();
 
   try {
@@ -671,18 +902,18 @@ router.post("/mnemonics", requireAuth, async (req: Request, res: Response) => {
 
     if (cardIds && cardIds.length > 0) {
       const selectedCards = await db.query.cards.findMany({ where: inArray(cards.id, cardIds) });
-      content = selectedCards.map(c => `${c.front}: ${c.back}`).join("\n");
+      content = selectedCards.map((crd: any) => `${crd.front}: ${crd.back}`).join("\n");
     } else if (deckId) {
       const deckCards = await db.query.cards.findMany({ where: eq(cards.deckId, deckId), limit: 20 });
-      content = deckCards.map(c => `${c.front}: ${c.back}`).join("\n");
+      content = deckCards.map((crd: any) => `${crd.front}: ${crd.back}`).join("\n");
     }
 
     if (!content) {
-      res.status(400).json({ error: { code: "INVALID_INPUT", message: "Concept, cardIds, or deckId is required" } });
-      return;
+      return c.json({ error: { code: "INVALID_INPUT", message: "Concept, cardIds, or deckId is required" } }, 400);
     }
 
-    const response = await aiService.complete([
+    const ai = createAIService(c.env);
+    const response = await ai.complete([
       {
         role: "system",
         content: `You are a medical mnemonic expert. Generate creative, memorable mnemonics for the provided medical concepts.
@@ -698,31 +929,35 @@ Return ONLY valid JSON:
     }
 
     const result = JSON.parse(jsonMatch[0]);
-    await storeCachedResponse("mnemonic-generator", concept || content, JSON.stringify(result), "ai", 0.8);
-    trackUsage(userId, "mnemonic-generator", 0, Date.now() - startTime, true);
-    res.json(result);
+    await storeCachedResponse(db, "mnemonic-generator", concept || content, JSON.stringify(result), "ai", 0.8);
+    trackUsage(db, userId, "mnemonic-generator", 0, Date.now() - startTime, true);
+    return c.json(result);
   } catch (err) {
-    logger.error({ err }, "Mnemonic generation error");
-    trackUsage(userId, "mnemonic-generator", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Mnemonic generation failed" } });
+    trackUsage(db, userId, "mnemonic-generator", 0, Date.now() - startTime, false);
+    return serverError(c, "Mnemonic generation failed");
   }
 });
 
-router.post("/mnemonics/save", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { cardId, mnemonic } = req.body as { cardId: number; mnemonic: string };
-
+// POST /api/agents/mnemonics/save
+agentRoutes.post("/agents/mnemonics/save", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
+    const db = getDb(c);
+    const body = await readJson(c);
+    const { cardId, mnemonic } = body as { cardId: number; mnemonic: string };
     await db.update(cards).set({ explanationMnemonic: mnemonic, updatedAt: new Date() }).where(eq(cards.id, cardId));
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
-    logger.error({ err }, "Save mnemonic error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to save mnemonic" } });
+    return serverError(c, "Failed to save mnemonic");
   }
 });
 
-router.get("/coach", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
+// GET /api/agents/coach
+agentRoutes.get("/agents/coach", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
   const startTime = Date.now();
 
   try {
@@ -736,9 +971,9 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
     const allCards = await db.query.cards.findMany();
     const progressEntries = await db.query.cardProgress.findMany({ where: eq(cardProgress.userId, userId) });
 
-    const totalCardsStudied = sessions.reduce((sum, s) => sum + s.cardsStudied, 0);
-    const totalKnown = sessions.reduce((sum, s) => sum + (s.knownCount || 0), 0);
-    const totalUnknown = sessions.reduce((sum, s) => sum + (s.unknownCount || 0), 0);
+    const totalCardsStudied = sessions.reduce((sum: number, s: any) => sum + s.cardsStudied, 0);
+    const totalKnown = sessions.reduce((sum: number, s: any) => sum + (s.knownCount || 0), 0);
+    const totalUnknown = sessions.reduce((sum: number, s: any) => sum + (s.unknownCount || 0), 0);
     const overallAccuracy = totalCardsStudied > 0 ? Math.round((totalKnown / totalCardsStudied) * 100) : 0;
 
     const dayOfWeekCounts: number[] = [0, 0, 0, 0, 0, 0, 0];
@@ -755,7 +990,7 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
 
     const tagPerformance: Record<string, { known: number; unknown: number }> = {};
     for (const p of progressEntries) {
-      const card = allCards.find(c => c.id === p.cardId);
+      const card = allCards.find((crd: any) => crd.id === p.cardId);
       if (!card) continue;
       const tags = parseTags(card.tags);
       for (const tag of tags) {
@@ -770,7 +1005,7 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
         const total = v.known + v.unknown;
         return total > 2 && v.known / total < 0.6;
       })
-      .sort((a, b) => {
+      .sort((a: any, b: any) => {
         const ratioA = a[1].known / (a[1].known + a[1].unknown);
         const ratioB = b[1].known / (b[1].known + b[1].unknown);
         return ratioA - ratioB;
@@ -783,7 +1018,7 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
         const total = v.known + v.unknown;
         return total > 2 && v.known / total >= 0.8;
       })
-      .sort((a, b) => {
+      .sort((a: any, b: any) => {
         const ratioB = b[1].known / (b[1].known + b[1].unknown);
         const ratioA = a[1].known / (a[1].known + a[1].unknown);
         return ratioB - ratioA;
@@ -810,8 +1045,8 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
       { day: dayNames[(bestDay + 5) % 7], focus: "Weak areas", duration: 50 },
     ];
 
-    trackUsage(userId, "progress-coach", 0, Date.now() - startTime, true);
-    res.json({
+    trackUsage(db, userId, "progress-coach", 0, Date.now() - startTime, true);
+    return c.json({
       stats: {
         totalSessions: sessions.length,
         totalCardsStudied,
@@ -823,7 +1058,7 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
       patterns: {
         bestDay: dayNames[bestDay],
         bestHour: `${bestHour > 12 ? bestHour - 12 : bestHour}:00 ${bestHour >= 12 ? "PM" : "AM"}`,
-        averageSessionLength: sessions.length > 0 ? Math.round(sessions.reduce((s, x) => s + (x.durationMinutes || 0), 0) / sessions.length) : 0,
+        averageSessionLength: sessions.length > 0 ? Math.round(sessions.reduce((s: number, x: any) => s + (x.durationMinutes || 0), 0) / sessions.length) : 0,
       },
       weakTopics,
       strongTopics,
@@ -831,83 +1066,46 @@ router.get("/coach", requireAuth, async (req: Request, res: Response) => {
       weeklyPlan,
     });
   } catch (err) {
-    logger.error({ err }, "Coach error");
-    trackUsage(userId, "progress-coach", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Coach failed" } });
+    trackUsage(db, userId, "progress-coach", 0, Date.now() - startTime, false);
+    return serverError(c, "Coach failed");
   }
 });
 
-router.post("/image-analyze", requireAuth, uploadImage.single("image"), async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const startTime = Date.now();
-
-  if (!req.file) {
-    res.status(400).json({ error: { code: "INVALID_INPUT", message: "Image file is required" } });
-    return;
-  }
-
-  try {
-    const imageBuffer = req.file.buffer;
-    const base64Image = imageBuffer.toString("base64");
-    const mimeType = req.file.mimetype;
-
-    const analysis = await aiService.complete([
-      {
-        role: "system",
-        content: `You are a medical image analysis expert. Analyze the provided medical image and provide:
-1. Key findings
-2. Likely diagnosis or description
-3. Teaching points
-4. Generate 3-5 flashcards based on the image
-
-Return ONLY valid JSON:
-{"findings": "...", "diagnosis": "...", "teachingPoints": ["..."], "cards": [{"front": "...", "back": "...", "tags": ["..."]}]}`,
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Analyze this medical image and generate teaching points and flashcards." },
-          { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Image}` } },
-        ],
-      },
-    ] as any);
-
-    const jsonMatch = analysis.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error("Invalid image analysis response");
-    }
-
-    const result = JSON.parse(jsonMatch[0]);
-    await storeCachedResponse("image-analyze", `image:${mimeType}:${imageBuffer.length}`, JSON.stringify(result), "ai", 0.7);
-    trackUsage(userId, "image-analyzer", 0, Date.now() - startTime, true);
-    res.json(result);
-  } catch (err) {
-    logger.error({ err }, "Image analysis error");
-    trackUsage(userId, "image-analyzer", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Image analysis failed" } });
-  }
+// POST /api/agents/image-analyze — STUBBED: multimodal vision is not supported by createAIService.
+agentRoutes.post("/agents/image-analyze", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  return c.json({
+    error: { code: "NOT_SUPPORTED", message: "Image analysis (multimodal vision) is not available on this deployment" },
+  }, 501);
 });
 
-router.post("/voice-check", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { cardFront, cardBack, spokenAnswer } = req.body as { cardFront: string; cardBack: string; spokenAnswer: string };
+// POST /api/agents/voice-check
+agentRoutes.post("/agents/voice-check", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  if (!aiAvailable(c)) {
+    return c.json({ error: { code: "AI_UNAVAILABLE", message: "AI features require a configured API key (set OPENROUTER_API_KEY or another provider key in wrangler env)." } }, 503);
+  }
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { cardFront, cardBack, spokenAnswer } = body as { cardFront: string; cardBack: string; spokenAnswer: string };
   const startTime = Date.now();
 
   if (!spokenAnswer || !cardBack) {
-    res.status(400).json({ error: { code: "INVALID_INPUT", message: "spokenAnswer and cardBack are required" } });
-    return;
+    return c.json({ error: { code: "INVALID_INPUT", message: "spokenAnswer and cardBack are required" } }, 400);
   }
 
   try {
     const cacheKey = `voice:${cardFront}:${spokenAnswer}`;
-    const cached = await getCachedResponse("voice-tutor", cacheKey);
+    const cached = await getCachedResponse(db, "voice-tutor", cacheKey);
     if (cached) {
-      trackUsage(userId, "voice-tutor", 0, Date.now() - startTime, true);
-      res.json(JSON.parse(cached.answer));
-      return;
+      trackUsage(db, userId, "voice-tutor", 0, Date.now() - startTime, true);
+      return c.json(JSON.parse(cached.answer));
     }
 
-    const response = await aiService.complete([
+    const ai = createAIService(c.env);
+    const response = await ai.complete([
       {
         role: "system",
         content: `You are a medical study tutor. Compare the student's spoken answer to the correct answer. Be lenient — accept semantically correct answers even if wording differs.
@@ -926,47 +1124,50 @@ Return ONLY valid JSON:
     }
 
     const result = JSON.parse(jsonMatch[0]);
-    await storeCachedResponse("voice-tutor", cacheKey, JSON.stringify(result), "ai", 0.8);
-    trackUsage(userId, "voice-tutor", 0, Date.now() - startTime, true);
-    res.json(result);
+    await storeCachedResponse(db, "voice-tutor", cacheKey, JSON.stringify(result), "ai", 0.8);
+    trackUsage(db, userId, "voice-tutor", 0, Date.now() - startTime, true);
+    return c.json(result);
   } catch (err) {
-    logger.error({ err }, "Voice check error");
-    trackUsage(userId, "voice-tutor", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Voice check failed" } });
+    trackUsage(db, userId, "voice-tutor", 0, Date.now() - startTime, false);
+    return serverError(c, "Voice check failed");
   }
 });
 
-router.post("/group-study/create", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { deckIds } = req.body as { deckIds: number[] };
-
+// POST /api/agents/group-study/create
+agentRoutes.post("/agents/group-study/create", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const roomId = crypto.randomBytes(4).toString("hex");
+    const db = getDb(c);
+    const body = await readJson(c);
+    const { deckIds } = body as { deckIds: number[] };
+
+    const roomId = crypto.randomUUID();
     const [room] = await db.insert(groupStudyRooms).values({
       id: roomId,
       hostUserId: userId,
       deckIds: JSON.stringify(deckIds || []),
       participants: JSON.stringify([{ userId, joinedAt: new Date().toISOString() }]),
-      createdAt: new Date(),
-      updatedAt: new Date(),
     }).returning();
 
-    res.json({ room });
+    return c.json({ room });
   } catch (err) {
-    logger.error({ err }, "Create group study room error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to create room" } });
+    return serverError(c, "Failed to create room");
   }
 });
 
-router.post("/group-study/join", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { roomId } = req.body as { roomId: string };
-
+// POST /api/agents/group-study/join
+agentRoutes.post("/agents/group-study/join", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
+    const db = getDb(c);
+    const body = await readJson(c);
+    const { roomId } = body as { roomId: string };
+
     const room = await db.query.groupStudyRooms.findFirst({ where: eq(groupStudyRooms.id, roomId) });
     if (!room) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Room not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Room not found" } }, 404);
     }
 
     const participants = JSON.parse(room.participants);
@@ -975,35 +1176,37 @@ router.post("/group-study/join", requireAuth, async (req: Request, res: Response
       await db.update(groupStudyRooms).set({ participants: JSON.stringify(participants), updatedAt: new Date() }).where(eq(groupStudyRooms.id, roomId));
     }
 
-    res.json({ room: { ...room, participants } });
+    return c.json({ room: { ...room, participants } });
   } catch (err) {
-    logger.error({ err }, "Join group study room error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to join room" } });
+    return serverError(c, "Failed to join room");
   }
 });
 
-router.post("/group-study/question", requireAuth, async (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  const { roomId } = req.body as { roomId: string };
+// POST /api/agents/group-study/question
+agentRoutes.post("/agents/group-study/question", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
+  const db = getDb(c);
+  const body = await readJson(c);
+  const { roomId } = body as { roomId: string };
   const startTime = Date.now();
 
   try {
     const room = await db.query.groupStudyRooms.findFirst({ where: eq(groupStudyRooms.id, roomId) });
     if (!room) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Room not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Room not found" } }, 404);
     }
 
     const deckIds = JSON.parse(room.deckIds);
     if (deckIds.length === 0) {
-      res.status(400).json({ error: { code: "NO_DECKS", message: "No decks selected for this room" } });
-      return;
+      return c.json({ error: { code: "NO_DECKS", message: "No decks selected for this room" } }, 400);
     }
 
     const roomCards = await db.query.cards.findMany({ where: inArray(cards.deckId, deckIds), limit: 20 });
-    const cardContent = roomCards.map(c => `Q: ${c.front}\nA: ${c.back}`).join("\n\n");
+    const cardContent = roomCards.map((crd: any) => `Q: ${crd.front}\nA: ${crd.back}`).join("\n\n");
 
-    const response = await aiService.complete([
+    const ai = createAIService(c.env);
+    const response = await ai.complete([
       {
         role: "system",
         content: `Generate a single high-quality medical MCQ for group study. Return ONLY valid JSON:
@@ -1018,37 +1221,41 @@ router.post("/group-study/question", requireAuth, async (req: Request, res: Resp
     }
 
     const question = JSON.parse(jsonMatch[0]);
-    await storeCachedResponse("collaborative-study", `group:${roomId}:${cardContent.slice(0, 100)}`, JSON.stringify(question), "ai", 0.8);
+    await storeCachedResponse(db, "collaborative-study", `group:${roomId}:${cardContent.slice(0, 100)}`, JSON.stringify(question), "ai", 0.8);
     const questions = JSON.parse(room.questions);
     questions.push(question);
     await db.update(groupStudyRooms).set({ questions: JSON.stringify(questions), currentQuestionIndex: questions.length - 1, updatedAt: new Date() }).where(eq(groupStudyRooms.id, roomId));
 
-    trackUsage(userId, "group-study", 0, Date.now() - startTime, true);
-    res.json({ question, questionIndex: questions.length - 1 });
+    trackUsage(db, userId, "group-study", 0, Date.now() - startTime, true);
+    return c.json({ question, questionIndex: questions.length - 1 });
   } catch (err) {
-    logger.error({ err }, "Group study question error");
-    trackUsage(userId, "group-study", 0, Date.now() - startTime, false);
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to generate question" } });
+    trackUsage(db, userId, "group-study", 0, Date.now() - startTime, false);
+    return serverError(c, "Failed to generate question");
   }
 });
 
-router.get("/group-study/:roomId", requireAuth, async (req: Request, res: Response) => {
+// GET /api/agents/group-study/:roomId
+agentRoutes.get("/agents/group-study/:roomId", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const room = await db.query.groupStudyRooms.findFirst({ where: eq(groupStudyRooms.id, req.params.roomId) });
+    const db = getDb(c);
+    const room = await db.query.groupStudyRooms.findFirst({ where: eq(groupStudyRooms.id, c.req.param("roomId")) });
     if (!room) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Room not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Room not found" } }, 404);
     }
-    res.json({ room });
+    return c.json({ room });
   } catch (err) {
-    logger.error({ err }, "Get group study room error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get room" } });
+    return serverError(c, "Failed to get room");
   }
 });
 
-router.get("/usage", requireAuth, async (req: Request, res: Response) => {
+// GET /api/agents/usage
+agentRoutes.get("/agents/usage", async (c) => {
+  const userId = getUserId(c);
+  if (!userId) return unauthorized(c);
   try {
-    const userId = getUserId(req);
+    const db = getDb(c);
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
 
     const usage = await db.query.agentUsage.findMany({
@@ -1067,11 +1274,8 @@ router.get("/usage", requireAuth, async (req: Request, res: Response) => {
       byAgent[agent].successRate = Math.round((byAgent[agent].successRate / byAgent[agent].calls) * 100);
     }
 
-    res.json({ usage, byAgent, totalCalls: usage.length });
+    return c.json({ usage, byAgent, totalCalls: usage.length });
   } catch (err) {
-    logger.error({ err }, "Agent usage error");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get usage" } });
+    return serverError(c, "Failed to get usage");
   }
 });
-
-export default router;

@@ -36,6 +36,7 @@ export function Breadcrumb() {
       "image-analyze": "Image Analyzer",
       "voice-study": "Voice Study",
       "group-study": "Group Study",
+      studypilot: "StudyPilot",
     };
 
     if (routeLabels[firstSegment]) {

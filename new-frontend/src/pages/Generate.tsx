@@ -17,6 +17,7 @@ import SummaryProgressBar from "../components/summary/SummaryProgressBar";
 import SummaryResult from "../components/summary/SummaryResult";
 import PerFileProgressList from "../components/summary/PerFileProgressList";
 import { useSummaryGeneration } from "../hooks/useSummaryGeneration";
+import { extractPdfTextClient } from "../lib/pdfExtractClient";
 
 type Mode = "deck" | "qbank" | "summary";
 type DeckStep = "input" | "processing" | "preview" | "saved";
@@ -108,18 +109,39 @@ export default function Generate() {
     setProgress(["Extracting text from files..."]);
     try {
       setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, status: "extracting" } : f));
-      const result = await api.extractApi.extractPDFsWithProgress(
-        fileArray,
-        (pct) => {
-          setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, progress: pct } : f));
-        },
-      );
-      setText((prev) => prev + (prev ? "\n\n" : "") + result.text);
+      let combinedText = "";
+      let totalPages = 0;
+      let totalWords = 0;
+      // Extract each file client-side with pdfjs so CID / Identity-H PDFs
+      // (e.g. WeasyPrint) decode correctly. Fall back to the server
+      // extractor per-file if the browser engine fails.
+      for (const file of fileArray) {
+        let text = "";
+        let pageCount = 0;
+        let wordCount = 0;
+        try {
+          const res = await extractPdfTextClient(file, (p, t) => {
+            setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, progress: Math.round((p / t) * 100) } : f));
+          });
+          text = res.text;
+          pageCount = res.pageCount;
+          wordCount = res.wordCount;
+        } catch {
+          const res = await api.extractApi.extractPDF(file);
+          text = res.text;
+          pageCount = res.pageCount;
+          wordCount = (res.text.match(/\S+/g) || []).length;
+        }
+        combinedText += (combinedText ? "\n\n" : "") + text;
+        totalPages += pageCount;
+        totalWords += wordCount;
+        setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, status: "done", progress: 100 } : f));
+      }
+      setText((prev) => prev + (prev ? "\n\n" : "") + combinedText);
       // Auto-fill the deck name from the first uploaded file so the Generate
       // button isn't left disabled after a successful upload.
       setDeckName((prev) => prev.trim() || fileArray[0]?.name.replace(/\.[^.]+$/, "") || "");
-      setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, status: "done", progress: 100 } : f));
-      setProgress((prev) => [...prev, `Extracted ${result.wordCount} words from ${result.pageCount} pages across ${result.fileCount} files`]);
+      setProgress((prev) => [...prev, `Extracted ${totalWords} words from ${totalPages} pages across ${fileArray.length} files`]);
     } catch (err) {
       setDeckError((err as Error).message);
       setDeckFiles((prev) => prev.map((f, i) => i >= prev.length - fileArray.length ? { ...f, status: "error", error: (err as Error).message } : f));
@@ -325,7 +347,7 @@ export default function Generate() {
                 <div className="space-y-5">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <GlowingInput label="Deck Name" value={deckName} onChange={(e) => setDeckName(e.target.value)} placeholder="e.g. Cardiology Basics" />
-                    <GlowingInput label="Number of Cards" type="number" value={cardCount} onChange={(e) => setCardCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 10)))} min={1} max={50} />
+                    <GlowingInput label="Number of Cards" type="number" value={cardCount} onChange={(e) => setCardCount(Math.max(1, Math.min(300, parseInt(e.target.value) || 10)))} min={1} max={300} />
                   </div>
 
                   <div>
@@ -499,7 +521,7 @@ export default function Generate() {
                 <div className="space-y-5">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <GlowingInput label="Question Bank Name" value={deckName} onChange={(e) => setDeckName(e.target.value)} placeholder="e.g. Cardiology MCQs" />
-                    <GlowingInput label="Number of Questions" type="number" value={cardCount} onChange={(e) => setCardCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 10)))} min={1} max={50} />
+                    <GlowingInput label="Number of Questions" type="number" value={cardCount} onChange={(e) => setCardCount(Math.max(1, Math.min(300, parseInt(e.target.value) || 10)))} min={1} max={300} />
                   </div>
 
                   <div>

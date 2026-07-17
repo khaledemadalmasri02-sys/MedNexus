@@ -1,16 +1,11 @@
-import { Router, Request, Response } from "express";
-import { db, userSettings } from "../db/index.js";
+import { Hono } from "hono";
 import { eq } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import { requireAuth } from "../middleware/auth.js";
-import { validateBody } from "../middleware/validate.js";
-import { updateSettingsSchema } from "./validators.js";
+import type { AppEnv } from "../types";
+import { userSettings } from "../db/index";
+import { getDb, getUserId, isAuthenticated, unauthorized, serverError } from "../lib/helpers";
+import { logger } from "../lib/logger";
 
-const router = Router();
-
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+export const settingsRoutes = new Hono<AppEnv>();
 
 function getDefaultSettings(userId: string) {
   return {
@@ -62,21 +57,37 @@ function getDefaultSettings(userId: string) {
   };
 }
 
-router.get("/settings", async (req: Request, res: Response) => {
+const ALLOWED_FIELDS = [
+  "dailyGoalMinutes", "dailyGoalCards", "reminderTime", "accentColor",
+  "dashboardLayout", "density", "soundEnabled", "theme",
+  "animationsEnabled", "fontSize", "defaultStyle", "defaultMode",
+  "autoTts", "chunkSize", "cardOrder", "autoReveal", "autoRevealSeconds",
+  "showExplanation", "streakFreeze", "emailNotifications",
+  "emailWeeklySummary", "emailStreakAlert", "pushNotifications",
+  "pushReminderTime", "pushReviewDue", "pushSessionComplete",
+  "inAppSounds", "soundVolume",
+  "ambientEnabled", "customCursorEnabled",
+  "ripplesEnabled", "animationSpeed", "reduceMotion",
+  "studyBuddyEnabled", "smartReviewEnabled", "deckDoctorEnabled",
+  "examSimulatorEnabled", "contentSummarizerEnabled", "mnemonicGeneratorEnabled",
+  "progressCoachEnabled", "imageAnalyzerEnabled", "voiceTutorEnabled",
+  "collaborativeStudyEnabled",
+];
+
+settingsRoutes.get("/settings", async (c) => {
   try {
-    const userId = getUserId(req);
+    const userId = getUserId(c);
     if (!userId) {
-      res.json(getDefaultSettings("guest"));
-      return;
+      return c.json(getDefaultSettings("guest"));
     }
 
+    const db = getDb(c);
     const existing = await db.query.userSettings.findFirst({
       where: eq(userSettings.userId, userId),
     });
 
     if (existing) {
-      res.json(existing);
-      return;
+      return c.json(existing);
     }
 
     const now = new Date();
@@ -87,44 +98,29 @@ router.get("/settings", async (req: Request, res: Response) => {
       updatedAt: now,
     }).returning();
 
-    res.json(created);
+    return c.json(created);
   } catch (err) {
     logger.error({ err }, "Failed to get settings");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get settings" } });
+    return serverError(c, "Failed to get settings");
   }
 });
 
-router.put("/settings", requireAuth, validateBody(updateSettingsSchema), async (req: Request, res: Response) => {
+settingsRoutes.put("/settings", async (c) => {
   try {
-    const userId = req.user!.id;
+    if (!isAuthenticated(c)) return unauthorized(c);
+    const userId = getUserId(c)!;
     const now = new Date();
-    const body = req.body;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
 
     const updateData: Record<string, unknown> = { updatedAt: now };
 
-    const allowedFields = [
-      "dailyGoalMinutes", "dailyGoalCards", "reminderTime", "accentColor",
-      "dashboardLayout", "density", "soundEnabled", "theme",
-      "animationsEnabled", "fontSize", "defaultStyle", "defaultMode",
-      "autoTts", "chunkSize", "cardOrder", "autoReveal", "autoRevealSeconds",
-      "showExplanation", "streakFreeze", "emailNotifications",
-      "emailWeeklySummary", "emailStreakAlert", "pushNotifications",
-      "pushReminderTime", "pushReviewDue", "pushSessionComplete",
-      "inAppSounds", "soundVolume",
-      "ambientEnabled", "customCursorEnabled",
-      "ripplesEnabled", "animationSpeed", "reduceMotion",
-      "studyBuddyEnabled", "smartReviewEnabled", "deckDoctorEnabled",
-      "examSimulatorEnabled", "contentSummarizerEnabled", "mnemonicGeneratorEnabled",
-      "progressCoachEnabled", "imageAnalyzerEnabled", "voiceTutorEnabled",
-      "collaborativeStudyEnabled",
-    ];
-
-    for (const field of allowedFields) {
+    for (const field of ALLOWED_FIELDS) {
       if (body[field] !== undefined) {
         updateData[field] = body[field];
       }
     }
 
+    const db = getDb(c);
     const existing = await db.query.userSettings.findFirst({
       where: eq(userSettings.userId, userId),
     });
@@ -138,17 +134,19 @@ router.put("/settings", requireAuth, validateBody(updateSettingsSchema), async (
     const updated = await db.query.userSettings.findFirst({
       where: eq(userSettings.userId, userId),
     });
-    res.json(updated);
+    return c.json(updated);
   } catch (err) {
     logger.error({ err }, "Failed to update settings");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to update settings" } });
+    return serverError(c, "Failed to update settings");
   }
 });
 
-router.post("/settings/reset", requireAuth, async (req: Request, res: Response) => {
+settingsRoutes.post("/settings/reset", async (c) => {
   try {
-    const userId = req.user!.id;
+    if (!isAuthenticated(c)) return unauthorized(c);
+    const userId = getUserId(c)!;
     const now = new Date();
+    const db = getDb(c);
 
     await db.delete(userSettings).where(eq(userSettings.userId, userId));
 
@@ -159,34 +157,19 @@ router.post("/settings/reset", requireAuth, async (req: Request, res: Response) 
       updatedAt: now,
     }).returning();
 
-    res.json(created);
+    return c.json(created);
   } catch (err) {
     logger.error({ err }, "Failed to reset settings");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to reset settings" } });
+    return serverError(c, "Failed to reset settings");
   }
 });
 
-router.post("/settings/sync", requireAuth, async (req: Request, res: Response) => {
+settingsRoutes.post("/settings/sync", async (c) => {
   try {
-    const userId = req.user!.id;
-    const guestSettings = req.body;
-
-    const allowedFields = [
-      "dailyGoalMinutes", "dailyGoalCards", "reminderTime", "accentColor",
-      "dashboardLayout", "density", "soundEnabled", "theme",
-      "animationsEnabled", "fontSize", "defaultStyle", "defaultMode",
-      "autoTts", "chunkSize", "cardOrder", "autoReveal", "autoRevealSeconds",
-      "showExplanation", "streakFreeze", "emailNotifications",
-      "emailWeeklySummary", "emailStreakAlert", "pushNotifications",
-      "pushReminderTime", "pushReviewDue", "pushSessionComplete",
-      "inAppSounds", "soundVolume",
-      "ambientEnabled", "customCursorEnabled",
-      "ripplesEnabled", "animationSpeed", "reduceMotion",
-      "studyBuddyEnabled", "smartReviewEnabled", "deckDoctorEnabled",
-      "examSimulatorEnabled", "contentSummarizerEnabled", "mnemonicGeneratorEnabled",
-      "progressCoachEnabled", "imageAnalyzerEnabled", "voiceTutorEnabled",
-      "collaborativeStudyEnabled",
-    ];
+    if (!isAuthenticated(c)) return unauthorized(c);
+    const userId = getUserId(c)!;
+    const guestSettings = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const db = getDb(c);
 
     const existing = await db.query.userSettings.findFirst({
       where: eq(userSettings.userId, userId),
@@ -195,11 +178,12 @@ router.post("/settings/sync", requireAuth, async (req: Request, res: Response) =
     if (existing) {
       const updateData: Record<string, unknown> = { updatedAt: new Date() };
 
-      for (const field of allowedFields) {
-        if (guestSettings[field] !== undefined &&
-            guestSettings[field] !== null &&
-          !(typeof guestSettings[field] === "object" && Object.keys(guestSettings[field]).length === 0)) {
-          updateData[field] = guestSettings[field];
+      for (const field of ALLOWED_FIELDS) {
+        const value = guestSettings[field];
+        if (value !== undefined &&
+            value !== null &&
+            !(typeof value === "object" && Object.keys(value).length === 0)) {
+          updateData[field] = value;
         }
       }
 
@@ -208,13 +192,13 @@ router.post("/settings/sync", requireAuth, async (req: Request, res: Response) =
       const now = new Date();
       const defaults = getDefaultSettings(userId);
 
-      const merged = { ...defaults, userId, createdAt: now, updatedAt: now };
-      for (const field of allowedFields) {
+      const merged: Record<string, unknown> = { ...defaults, userId, createdAt: now, updatedAt: now };
+      for (const field of ALLOWED_FIELDS) {
         const value = guestSettings[field];
         if (value !== undefined &&
             value !== null &&
-          !(typeof value === "object" && Object.keys(value).length === 0)) {
-          (merged as Record<string, unknown>)[field] = value;
+            !(typeof value === "object" && Object.keys(value).length === 0)) {
+          merged[field] = value;
         }
       }
 
@@ -225,11 +209,9 @@ router.post("/settings/sync", requireAuth, async (req: Request, res: Response) =
       where: eq(userSettings.userId, userId),
     });
 
-    res.json({ success: true, settings: updated });
+    return c.json({ success: true, settings: updated });
   } catch (err) {
     logger.error({ err }, "Failed to sync settings");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to sync settings" } });
+    return serverError(c, "Failed to sync settings");
   }
 });
-
-export default router;

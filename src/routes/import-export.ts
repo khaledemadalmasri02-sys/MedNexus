@@ -1,21 +1,14 @@
-import { Router, Request, Response } from "express";
-import { db, decks, cards } from "../db/index.js";
-import { eq, inArray } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
+import { Hono } from "hono";
 import { z } from "zod";
-import { validateBody } from "../middleware/validate.js";
+import { eq, inArray } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import { decks, cards } from "../db/index";
+import { getDb } from "../lib/helpers";
+import { validate } from "../middleware/validate";
+import { logger } from "../lib/logger";
 
-const router = Router();
+export const importExportRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
-
-function deckOwnerFilter(userId: string | null) {
-  return userId ? eq(decks.userId, userId) : ((decks.userId as unknown) === null);
-}
-
-// ── Import schema ──
 const importCardsSchema = z.object({
   cards: z.array(z.object({
     front: z.string().min(1).max(10000),
@@ -28,25 +21,31 @@ const importCardsSchema = z.object({
   skipDuplicates: z.boolean().optional().default(false),
 });
 
-// ── POST /api/decks/:id/import — import cards into a deck ──
-router.post("/decks/:id/import", validateBody(importCardsSchema), async (req: Request, res: Response) => {
-  const deckId = parseInt(req.params.id, 10);
+const bulkExportSchema = z.object({
+  deckIds: z.array(z.number().int().positive()).min(1),
+  format: z.enum(["csv", "json"]).optional().default("csv"),
+});
+
+const parseImportSchema = z.object({
+  text: z.string().min(1).max(200000),
+  format: z.enum(["csv", "tsv", "json", "text"]).optional(),
+});
+
+importExportRoutes.post("/decks/:id/import", validate(importCardsSchema), async (c) => {
+  const deckId = parseInt(c.req.param("id") ?? "", 10);
   if (isNaN(deckId)) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } });
-    return;
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } }, 400);
   }
 
-  const { cards: importCards, skipDuplicates } = req.body;
+  const { cards: importCards, skipDuplicates } = c.get("validated") as any;
 
   try {
-    const userId = getUserId(req);
+    const db = getDb(c);
     const deck = await db.query.decks.findFirst({ where: eq(decks.id, deckId) });
     if (!deck) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Deck not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Deck not found" } }, 404);
     }
 
-    // Check for duplicates if requested
     let cardsToInsert = importCards;
     if (skipDuplicates) {
       const existingCards = await db.query.cards.findMany({
@@ -57,8 +56,7 @@ router.post("/decks/:id/import", validateBody(importCardsSchema), async (req: Re
     }
 
     if (cardsToInsert.length === 0) {
-      res.json({ imported: 0, skipped: importCards.length, message: "All cards were duplicates" });
-      return;
+      return c.json({ imported: 0, skipped: importCards.length, message: "All cards were duplicates" });
     }
 
     const now = new Date();
@@ -76,32 +74,30 @@ router.post("/decks/:id/import", validateBody(importCardsSchema), async (req: Re
       }))
     ).returning();
 
-    res.status(201).json({
+    return c.json({
       imported: inserted.length,
       skipped: importCards.length - cardsToInsert.length,
       total: importCards.length,
-    });
+    }, 201);
   } catch (err) {
     logger.error({ err }, "Failed to import cards");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to import cards" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to import cards" } }, 500);
   }
 });
 
-// ── GET /api/decks/:id/export?format=csv|json|md — extended export ──
-router.get("/decks/:id/export", async (req: Request, res: Response) => {
-  const deckId = parseInt(req.params.id, 10);
+importExportRoutes.get("/decks/:id/export", async (c) => {
+  const deckId = parseInt(c.req.param("id") ?? "", 10);
   if (isNaN(deckId)) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } });
-    return;
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid deck ID" } }, 400);
   }
 
-  const format = (req.query.format as string) || "csv";
+  const format = c.req.query("format") || "csv";
 
   try {
+    const db = getDb(c);
     const deck = await db.query.decks.findFirst({ where: eq(decks.id, deckId) });
     if (!deck) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Deck not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Deck not found" } }, 404);
     }
 
     const deckCards = await db.query.cards.findMany({
@@ -110,58 +106,54 @@ router.get("/decks/:id/export", async (req: Request, res: Response) => {
     });
 
     if (format === "json") {
-      res.json({
+      return c.json({
         deckName: deck.name,
         description: deck.description,
-        cards: deckCards.map(c => ({
-          front: c.front,
-          back: c.back,
-          tags: c.tags,
-          cardType: c.cardType,
-          choices: c.choices,
-          correctIndex: c.correctIndex,
+        cards: deckCards.map(cc => ({
+          front: cc.front,
+          back: cc.back,
+          tags: cc.tags,
+          cardType: cc.cardType,
+          choices: cc.choices,
+          correctIndex: cc.correctIndex,
         })),
         cardCount: deckCards.length,
       });
-      return;
     }
 
     if (format === "md") {
-      const lines = deckCards.map((c, i) => {
-        const tags = c.tags ? ` [${c.tags}]` : "";
-        return `## Card ${i + 1}${tags}\n\n**Q:** ${c.front}\n\n**A:** ${c.back}\n\n---`;
+      const lines = deckCards.map((cc, i) => {
+        const tags = cc.tags ? ` [${cc.tags}]` : "";
+        return `## Card ${i + 1}${tags}\n\n**Q:** ${cc.front}\n\n**A:** ${cc.back}\n\n---`;
       });
-      res.setHeader("Content-Type", "text/markdown");
-      res.setHeader("Content-Disposition", `attachment; filename="${deck.name}.md"`);
-      res.send(`# ${deck.name}\n\n${lines.join("\n\n")}`);
-      return;
+      const markdown = `# ${deck.name}\n\n${lines.join("\n\n")}`;
+      return new Response(markdown, {
+        headers: {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${deck.name}.md"`,
+        },
+      });
     }
 
-    // Default CSV
-    const rows = deckCards.map(c => {
-      const front = c.front.replace(/\t/g, " ").replace(/\n/g, "<br>");
-      const back = c.back.replace(/\t/g, " ").replace(/\n/g, "<br>");
-      const tags = c.tags ? c.tags.replace(/\t/g, " ") : "";
+    const rows = deckCards.map(cc => {
+      const front = cc.front.replace(/\t/g, " ").replace(/\n/g, "<br>");
+      const back = cc.back.replace(/\t/g, " ").replace(/\n/g, "<br>");
+      const tags = cc.tags ? cc.tags.replace(/\t/g, " ") : "";
       return tags ? `${front}\t${back}\t${tags}` : `${front}\t${back}`;
     });
 
-    res.json({ deckName: deck.name, csv: rows.join("\n"), cardCount: deckCards.length });
+    return c.json({ deckName: deck.name, csv: rows.join("\n"), cardCount: deckCards.length });
   } catch (err) {
     logger.error({ err }, "Failed to export deck");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to export deck" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to export deck" } }, 500);
   }
 });
 
-// ── POST /api/decks/bulk-export — export multiple decks as ZIP ──
-const bulkExportSchema = z.object({
-  deckIds: z.array(z.number().int().positive()).min(1),
-  format: z.enum(["csv", "json"]).optional().default("csv"),
-});
-
-router.post("/decks/bulk-export", validateBody(bulkExportSchema), async (req: Request, res: Response) => {
-  const { deckIds, format } = req.body;
+importExportRoutes.post("/decks/bulk-export", validate(bulkExportSchema), async (c) => {
+  const { deckIds, format } = c.get("validated") as any;
 
   try {
+    const db = getDb(c);
     const allDecks = await db.query.decks.findMany({
       where: inArray(decks.id, deckIds),
     });
@@ -178,16 +170,16 @@ router.post("/decks/bulk-export", validateBody(bulkExportSchema), async (req: Re
       if (format === "json") {
         content = JSON.stringify({
           deckName: deck.name,
-          cards: deckCards.map(c => ({
-            front: c.front, back: c.back, tags: c.tags, cardType: c.cardType,
+          cards: deckCards.map(cc => ({
+            front: cc.front, back: cc.back, tags: cc.tags, cardType: cc.cardType,
           })),
         }, null, 2);
         mimeType = "application/json";
       } else {
-        const rows = deckCards.map(c => {
-          const front = c.front.replace(/\t/g, " ").replace(/\n/g, "<br>");
-          const back = c.back.replace(/\t/g, " ").replace(/\n/g, "<br>");
-          const tags = c.tags ? c.tags.replace(/\t/g, " ") : "";
+        const rows = deckCards.map(cc => {
+          const front = cc.front.replace(/\t/g, " ").replace(/\n/g, "<br>");
+          const back = cc.back.replace(/\t/g, " ").replace(/\n/g, "<br>");
+          const tags = cc.tags ? cc.tags.replace(/\t/g, " ") : "";
           return tags ? `${front}\t${back}\t${tags}` : `${front}\t${back}`;
         });
         content = rows.join("\n");
@@ -197,28 +189,20 @@ router.post("/decks/bulk-export", validateBody(bulkExportSchema), async (req: Re
       return { name: deck.name, content, mimeType, cardCount: deckCards.length };
     }));
 
-    // Return as JSON array of files (frontend will handle ZIP)
-    res.json({ files: results, format });
+    return c.json({ files: results, format });
   } catch (err) {
     logger.error({ err }, "Failed to bulk export decks");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to export decks" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to export decks" } }, 500);
   }
 });
 
-// ── POST /api/import/parse — parse uploaded file into cards preview ──
-const parseImportSchema = z.object({
-  text: z.string().min(1).max(200000),
-  format: z.enum(["csv", "tsv", "json", "text"]).optional(),
-});
-
-router.post("/import/parse", validateBody(parseImportSchema), async (req: Request, res: Response) => {
-  const { text, format: hint } = req.body;
+importExportRoutes.post("/import/parse", validate(parseImportSchema), async (c) => {
+  const { text, format: hint } = c.get("validated") as any;
 
   try {
     let detectedFormat = hint;
     const results: Array<{ front: string; back: string; cardType: string; tags: string; error?: string }> = [];
 
-    // Auto-detect format
     if (!detectedFormat) {
       const trimmed = text.trim();
       if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
@@ -234,8 +218,7 @@ router.post("/import/parse", validateBody(parseImportSchema), async (req: Reques
       const parsed = JSON.parse(text);
       const cardsArray = Array.isArray(parsed) ? parsed : parsed.cards;
       if (!Array.isArray(cardsArray)) {
-        res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "JSON must be an array or have a 'cards' field" } });
-        return;
+        return c.json({ error: { code: "VALIDATION_ERROR", message: "JSON must be an array or have a 'cards' field" } }, 400);
       }
       for (const item of cardsArray) {
         const front = (item.front || item.question || "").trim();
@@ -258,12 +241,10 @@ router.post("/import/parse", validateBody(parseImportSchema), async (req: Reques
         }
       }
     } else {
-      // Text: one card per line, front/back separated by tab or " - "
       const lines = text.split("\n").filter((l: string) => l.trim());
       for (const line of lines) {
         const parts = line.includes("\t") ? line.split("\t") : line.split(" - ").map((p: string) => p.trim());
         if (parts.length < 2) {
-          // Try splitting by first period or question mark
           const match = line.match(/^(.+?)[.?]\s+(.+)$/);
           if (match) {
             results.push({ front: match[1].trim(), back: match[2].trim(), cardType: "basic", tags: "" });
@@ -276,7 +257,7 @@ router.post("/import/parse", validateBody(parseImportSchema), async (req: Reques
       }
     }
 
-    res.json({
+    return c.json({
       cards: results,
       total: results.length,
       valid: results.filter(r => !r.error).length,
@@ -285,8 +266,6 @@ router.post("/import/parse", validateBody(parseImportSchema), async (req: Reques
     });
   } catch (err) {
     logger.error({ err }, "Failed to parse import");
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Failed to parse file content" } });
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Failed to parse file content" } }, 400);
   }
 });
-
-export default router;

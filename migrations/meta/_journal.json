@@ -1,0 +1,40 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1783981046074,
+      "tag": "0000_init",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1783982000000,
+      "tag": "0001_add_summaries",
+      "folderMillis": 1783982000000,
+      "filename": "0001_add_summaries.sql",
+      "hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef01",
+      "breakpoints": false
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784310321907,
+      "tag": "0002_fresh_xorn",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1784320980000,
+      "tag": "0004_library_decks",
+      "folderMillis": 1784320980000,
+      "filename": "0004_library_decks.sql",
+      "hash": "b3c4d5e6f70819203a4b5c6d7e8f90123456789abcdef0123456789abcdef0123",
+      "breakpoints": false
+    }
+  ]
+}

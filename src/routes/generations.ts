@@ -1,28 +1,23 @@
-import { Router, Request, Response } from "express";
-import { db, generationLogs, decks, cards } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, desc, and, isNull, sql } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
+import type { AppEnv } from "../types";
+import { generationLogs, decks } from "../db/index";
+import { getDb, getUserId } from "../lib/helpers";
+import { logger } from "../lib/logger";
 
-const router = Router();
+export const generationRoutes = new Hono<AppEnv>();
 
-// Get user ID from request
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
-
-// List generation history
-router.get("/", async (req: Request, res: Response) => {
+generationRoutes.get("/generations", async (c) => {
   try {
-    const userId = getUserId(req);
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
-    const offset = parseInt(req.query.offset as string) || 0;
-    
-    // Build query based on user
-    const whereClause = userId 
+    const userId = getUserId(c);
+    const limit = Math.min(parseInt(c.req.query("limit") || "") || 50, 100);
+    const offset = parseInt(c.req.query("offset") || "") || 0;
+
+    const whereClause = userId
       ? eq(generationLogs.userId, userId)
       : isNull(generationLogs.userId);
-    
-    // Get generation logs with deck info
+
+    const db = getDb(c);
     const logs = await db.select({
       id: generationLogs.id,
       type: generationLogs.type,
@@ -36,23 +31,22 @@ router.get("/", async (req: Request, res: Response) => {
       deckName: decks.name,
       deckId: decks.id,
     })
-    .from(generationLogs)
-    .leftJoin(decks, eq(decks.userId, generationLogs.userId))
-    .where(whereClause)
-    .orderBy(desc(generationLogs.createdAt))
-    .limit(limit)
-    .offset(offset);
-    
-    // Get total count
+      .from(generationLogs)
+      .leftJoin(decks, eq(decks.userId, generationLogs.userId))
+      .where(whereClause)
+      .orderBy(desc(generationLogs.createdAt))
+      .limit(limit)
+      .offset(offset);
+
     const countResult = await db.select({
       count: sql<number>`count(*)`,
     })
-    .from(generationLogs)
-    .where(whereClause);
-    
+      .from(generationLogs)
+      .where(whereClause);
+
     const total = countResult[0]?.count || 0;
-    
-    res.json({
+
+    return c.json({
       generations: logs,
       pagination: {
         total,
@@ -63,21 +57,20 @@ router.get("/", async (req: Request, res: Response) => {
     });
   } catch (err) {
     logger.error({ err }, "Failed to list generations");
-    res.status(500).json({
+    return c.json({
       error: { code: "INTERNAL_ERROR", message: "Failed to list generation history" },
-    });
+    }, 500);
   }
 });
 
-// Get generation statistics
-router.get("/stats", async (req: Request, res: Response) => {
+generationRoutes.get("/generations/stats", async (c) => {
   try {
-    const userId = getUserId(req);
-    const whereClause = userId 
+    const userId = getUserId(c);
+    const whereClause = userId
       ? eq(generationLogs.userId, userId)
       : isNull(generationLogs.userId);
-    
-    // Get stats
+
+    const db = getDb(c);
     const stats = await db.select({
       totalGenerations: sql<number>`count(*)`,
       successfulGenerations: sql<number>`sum(case when ${generationLogs.success} = 1 then 1 else 0 end)`,
@@ -86,99 +79,89 @@ router.get("/stats", async (req: Request, res: Response) => {
       avgDuration: sql<number>`avg(${generationLogs.durationMs})`,
       totalTokens: sql<number>`sum(${generationLogs.promptTokens} + ${generationLogs.completionTokens})`,
     })
-    .from(generationLogs)
-    .where(whereClause);
-    
-    // Get by type
+      .from(generationLogs)
+      .where(whereClause);
+
     const byType = await db.select({
       type: generationLogs.type,
       count: sql<number>`count(*)`,
     })
-    .from(generationLogs)
-    .where(whereClause)
-    .groupBy(generationLogs.type);
-    
-    res.json({
+      .from(generationLogs)
+      .where(whereClause)
+      .groupBy(generationLogs.type);
+
+    return c.json({
       ...stats[0],
       byType,
     });
   } catch (err) {
     logger.error({ err }, "Failed to get generation stats");
-    res.status(500).json({
+    return c.json({
       error: { code: "INTERNAL_ERROR", message: "Failed to get generation statistics" },
-    });
+    }, 500);
   }
 });
 
-// Clear generation history
-router.delete("/", async (req: Request, res: Response) => {
+generationRoutes.delete("/generations", async (c) => {
   try {
-    const userId = getUserId(req);
-    const { before, type } = req.body;
-    
-    // Build delete conditions
-    const conditions = [];
-    
+    const userId = getUserId(c);
+    const body = await c.req.json().catch(() => ({})) as any;
+    const { before, type } = body;
+
+    const conditions: any[] = [];
+
     if (userId) {
       conditions.push(eq(generationLogs.userId, userId));
     } else {
       conditions.push(isNull(generationLogs.userId));
     }
-    
+
     if (type) {
       conditions.push(eq(generationLogs.type, type));
     }
-    
+
     if (before) {
       const beforeDate = new Date(before);
       conditions.push(sql`${generationLogs.createdAt} < ${beforeDate}`);
     }
-    
-    // Delete matching logs
-    await db.delete(generationLogs).where(and(...conditions));
-    
-    res.status(204).send();
+
+    await getDb(c).delete(generationLogs).where(and(...conditions));
+
+    return new Response(null, { status: 204 });
   } catch (err) {
     logger.error({ err }, "Failed to clear generation history");
-    res.status(500).json({
+    return c.json({
       error: { code: "INTERNAL_ERROR", message: "Failed to clear generation history" },
-    });
+    }, 500);
   }
 });
 
-// Get single generation details
-router.get("/:id", async (req: Request, res: Response) => {
-  const id = parseInt(req.params.id, 10);
+generationRoutes.get("/generations/:id", async (c) => {
+  const id = parseInt(c.req.param("id") ?? "", 10);
   if (isNaN(id)) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-    return;
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
   }
-  
+
   try {
-    const userId = getUserId(req);
-    
-    const log = await db.query.generationLogs.findFirst({
+    const userId = getUserId(c);
+
+    const log = await getDb(c).query.generationLogs.findFirst({
       where: eq(generationLogs.id, id),
     });
-    
+
     if (!log) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Generation not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Generation not found" } }, 404);
     }
-    
-    // Check ownership
+
     if (log.userId !== userId) {
-      res.status(403).json({ error: { code: "FORBIDDEN", message: "Access denied" } });
-      return;
+      return c.json({ error: { code: "FORBIDDEN", message: "Access denied" } }, 403);
     }
-    
-    res.json(log);
+
+    return c.json(log);
   } catch (err) {
     logger.error({ err }, "Failed to get generation");
-    res.status(500).json({
+    return c.json({
       error: { code: "INTERNAL_ERROR", message: "Failed to get generation details" },
-    });
+    }, 500);
   }
 });
-
-export default router;

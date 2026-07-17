@@ -1,23 +1,21 @@
-import { Router, Request, Response } from "express";
-import { db, decks, cards } from "../db/index.js";
+import { Hono } from "hono";
 import { eq, and, sql, isNull } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import { decks, cards } from "../db/index";
+import { getDb, getUserId } from "../lib/helpers";
 
-const router = Router();
+export const searchRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
-
-router.get("/search", async (req: Request, res: Response) => {
+searchRoutes.get("/search", async (c) => {
   try {
-    const userId = getUserId(req);
-    const query = (req.query.q as string || "").trim().toLowerCase();
+    const userId = getUserId(c);
+    const query = (c.req.query("q") || "").trim().toLowerCase();
 
     if (!query) {
-      res.json({ decks: [], cards: [] });
-      return;
+      return c.json({ decks: [], cards: [] });
     }
 
+    const db = getDb(c);
     const userFilter = userId ? eq(decks.userId, userId) : isNull(decks.userId);
 
     const deckResults = await db.query.decks.findMany({
@@ -42,7 +40,7 @@ router.get("/search", async (req: Request, res: Response) => {
     const filteredCards = cardResults.filter((c: { deckId: number }) => deckIdsSet.has(c.deckId));
     const deckMap = new Map(deckResults.map((d: { id: number; name: string }) => [d.id, d.name]));
 
-    res.json({
+    return c.json({
       decks: deckResults.map((d: { id: number; name: string }) => ({
         id: d.id,
         name: d.name,
@@ -57,8 +55,6 @@ router.get("/search", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("Search error:", err);
-    res.status(500).json({ error: { message: "Search failed", code: "SEARCH_ERROR" } });
+    return c.json({ error: { message: "Search failed", code: "SEARCH_ERROR" } }, 500);
   }
 });
-
-export default router;

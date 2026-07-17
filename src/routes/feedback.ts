@@ -1,34 +1,30 @@
-import { Router, Request, Response } from "express";
-import { db, feedback } from "../db/index.js";
+import { Hono } from "hono";
+import type { AppEnv } from "../types";
+import { feedback } from "../db/index";
+import { getDb, getUserId } from "../lib/helpers";
 
-const router = Router();
+export const feedbackRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
-
-router.post("/feedback", async (req: Request, res: Response) => {
+feedbackRoutes.post("/feedback", async (c) => {
   try {
-    const userId = getUserId(req);
-    const { type, message, rating } = req.body;
+    const userId = getUserId(c);
+    const body = await c.req.json().catch(() => ({})) as any;
+    const { type, message, rating } = body;
 
     if (!message || typeof message !== "string") {
-      res.status(400).json({ error: { message: "Message is required", code: "VALIDATION_ERROR" } });
-      return;
+      return c.json({ error: { message: "Message is required", code: "VALIDATION_ERROR" } }, 400);
     }
 
-    await db.insert(feedback).values({
+    await getDb(c).insert(feedback).values({
       userId: userId || null,
       type: type || "other",
       message: message.trim(),
       rating: rating || null,
     });
 
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
     console.error("Feedback error:", err);
-    res.status(500).json({ error: { message: "Failed to submit feedback", code: "FEEDBACK_ERROR" } });
+    return c.json({ error: { message: "Failed to submit feedback", code: "FEEDBACK_ERROR" } }, 500);
   }
 });
-
-export default router;

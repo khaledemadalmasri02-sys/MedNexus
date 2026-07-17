@@ -229,7 +229,8 @@ export default function StudyExplanation({ front, back, isRevealed, cardId, expl
       const response = await api.explainApi.explain({
         front,
         back,
-        mode: modeMap[mode] as "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap"
+        mode: modeMap[mode] as "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap",
+        cardId,
       });
       setFetchedContent(response.explanation);
     } catch (err) {

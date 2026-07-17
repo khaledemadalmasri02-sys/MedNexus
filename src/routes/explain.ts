@@ -1,66 +1,96 @@
-import { Router, Request, Response } from "express";
-import { logger } from "../lib/logger.js";
-import { aiService } from "../lib/ai.js";
-import { getConfig } from "../config.js";
-import { validateBody } from "../middleware/validate.js";
-import { explainSchema, fullExplainSchema, batchExplainSchema } from "./validators.js";
+import { Hono } from "hono";
+import { eq } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import { readJson } from "../lib/helpers";
+import { createAIService } from "../lib/ai";
+import { cards } from "../db/index";
+import { validate, explainSchema, fullExplainSchema, batchExplainSchema } from "../middleware/validate";
 
-const router = Router();
+export const explainRoutes = new Hono<AppEnv>();
 
-export type ExplanationMode = "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap";
+type ExplanationMode = "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap";
+
+// Map an explanation mode to the card column that stores it, so on-demand
+// generation can persist the result back to the card for instant reuse.
+const MODE_COLUMN: Record<ExplanationMode, string> = {
+  full: "explanationFull",
+  revision: "explanationRevision",
+  osce: "explanationOsce",
+  brief: "explanationBrief",
+  mnemonic: "explanationMnemonic",
+  clinical: "explanationClinical",
+  testtrap: "explanationTesttrap",
+};
+
+// Persist a freshly generated explanation onto its card so Study mode can read
+// it instantly next time (instead of hitting the AI API again).
+async function persistExplanation(c: any, cardId: number, mode: ExplanationMode, content: string) {
+  if (!cardId || !content || content.trim() === "") return;
+  try {
+    await c.get("db").update(cards)
+      .set({ [MODE_COLUMN[mode]]: content, updatedAt: new Date() })
+      .where(eq(cards.id, cardId));
+  } catch (err) {
+    // Persisting is best-effort; never fail the explanation request over it.
+    console.error("Failed to persist explanation", err);
+  }
+}
 
 const VALID_MODES: ExplanationMode[] = ["full", "revision", "osce", "brief", "mnemonic", "clinical", "testtrap"];
 
-interface ExplanationRequest {
-  front: string;
-  back: string;
-  mode?: ExplanationMode;
+// Extract section headers (## / ###) from markdown
+function extractSections(markdown: string): string[] {
+  const sectionRegex = /^#{2,3}\s+(.+)$/gm;
+  const sections: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = sectionRegex.exec(markdown)) !== null) {
+    sections.push(match[1]);
+  }
+  return sections;
 }
 
-interface ExplanationResponse {
-  explanation: string;
-  mode: ExplanationMode;
-  front: string;
-  back: string;
-  generatedAt: string;
+function sseEvent(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-// Generate explanation for a card
-router.post("/", validateBody(explainSchema), async (req: Request, res: Response) => {
-  const { front, back, mode = "full" } = req.body;
+function sseResponse(stream: ReadableStream): Response {
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
 
+// ── POST /api/explain ──
+explainRoutes.post("/explain", validate(explainSchema), async (c) => {
+  const { front, back, mode = "full", cardId } = c.get("validated") as any;
   try {
-    const explanation = await aiService.explainCard(front, back, mode);
-    
-    const response: ExplanationResponse = {
+    const ai = createAIService(c.env);
+    const explanation = await ai.explainCard(front, back, mode);
+    await persistExplanation(c, cardId, mode, explanation);
+    return c.json({
       explanation,
       mode,
       front,
       back,
       generatedAt: new Date().toISOString(),
-    };
-    
-    res.json(response);
-  } catch (err) {
-    logger.error({ err }, "Explanation generation failed");
-    res.status(500).json({
-      error: { code: "GENERATION_ERROR", message: "Failed to generate explanation" },
     });
+  } catch (err) {
+    return c.json({ error: { code: "GENERATION_ERROR", message: "Failed to generate explanation" } }, 500);
   }
 });
 
-// Dedicated endpoint for Full Explanation with enhanced metadata
-router.post("/full", validateBody(fullExplainSchema), async (req: Request, res: Response) => {
-  const { front, back, topic } = req.body;
-
+// ── POST /api/explain/full ──
+explainRoutes.post("/explain/full", validate(fullExplainSchema), async (c) => {
+  const { front, back, topic } = c.get("validated") as any;
   try {
-    const explanation = await aiService.explainCard(front, back, "full");
-    
-    // Extract title from the generated content if present
+    const ai = createAIService(c.env);
+    const explanation = await ai.explainCard(front, back, "full");
     const titleMatch = explanation.match(/^#\s+(.+)$/m);
     const title = titleMatch ? titleMatch[1] : topic || front;
-    
-    const response = {
+    return c.json({
       explanation,
       mode: "full" as const,
       front,
@@ -68,122 +98,78 @@ router.post("/full", validateBody(fullExplainSchema), async (req: Request, res: 
       title,
       sections: extractSections(explanation),
       generatedAt: new Date().toISOString(),
-    };
-    
-    res.json(response);
-  } catch (err) {
-    logger.error({ err }, "Full explanation generation failed");
-    res.status(500).json({
-      error: { code: "GENERATION_ERROR", message: "Failed to generate full explanation" },
     });
+  } catch (err) {
+    return c.json({ error: { code: "GENERATION_ERROR", message: "Failed to generate full explanation" } }, 500);
   }
 });
 
-// Helper function to extract section headers from markdown
-function extractSections(markdown: string): string[] {
-  const sectionRegex: RegExp = /^#{2,3}\s+(.+)$/gm;
-  const sections: string[] = [];
-  let match: RegExpExecArray | null;
-  
-  while ((match = sectionRegex.exec(markdown)) !== null) {
-    sections.push(match[1]);
-  }
-  
-  return sections;
-}
+// ── POST /api/explain/stream (SSE) ──
+explainRoutes.post("/explain/stream", async (c) => {
+  const body = await readJson(c);
+  const { front, back, mode = "full" } = body as any;
 
-// Stream explanation with SSE
-router.post("/stream", async (req: Request, res: Response) => {
-  const { front, back, mode = "full" } = req.body;
-  
   if (!front || !back) {
-    res.status(400).json({
-      error: { code: "VALIDATION_ERROR", message: "Front and back of card are required" },
-    });
-    return;
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Front and back of card are required" } }, 400);
   }
-  
-  const validModes = ["full", "revision", "osce", "brief", "mnemonic", "clinical", "testtrap"];
-  if (!validModes.includes(mode)) {
-    res.status(400).json({
-      error: { code: "VALIDATION_ERROR", message: `Invalid mode. Must be one of: ${validModes.join(", ")}` },
-    });
-    return;
+  if (!VALID_MODES.includes(mode)) {
+    return c.json({
+      error: { code: "VALIDATION_ERROR", message: `Invalid mode. Must be one of: ${VALID_MODES.join(", ")}` },
+    }, 400);
   }
-  
-  // Set up SSE
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-  
-  const sendEvent = (event: string, data: unknown) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-  
-  try {
-    sendEvent("status", { message: "Generating explanation..." });
-    
-    let fullExplanation = "";
-    for await (const chunk of aiService.streamExplainCard(front, back, mode)) {
-      fullExplanation += chunk;
-      sendEvent("chunk", { content: chunk });
-    }
-    
-    // Extract sections for navigation
-    const sections = extractSections(fullExplanation);
-    const titleMatch = fullExplanation.match(/^#\s+(.+)$/m);
-    
-    sendEvent("complete", {
-      explanation: fullExplanation,
-      mode,
-      front,
-      back,
-      title: titleMatch ? titleMatch[1] : front,
-      sections,
-      generatedAt: new Date().toISOString(),
-    });
-    
-    res.end();
-  } catch (err) {
-    logger.error({ err }, "Stream explanation failed");
-    sendEvent("error", { message: "Failed to generate explanation" });
-    res.end();
-  }
+
+  const ai = createAIService(c.env);
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: string, data: unknown) =>
+        controller.enqueue(encoder.encode(sseEvent(event, data)));
+      try {
+        send("status", { message: "Generating explanation..." });
+        let fullExplanation = "";
+        for await (const chunk of ai.streamExplainCard(front, back, mode)) {
+          fullExplanation += chunk;
+          send("chunk", { content: chunk });
+        }
+        const sections = extractSections(fullExplanation);
+        const titleMatch = fullExplanation.match(/^#\s+(.+)$/m);
+        send("complete", {
+          explanation: fullExplanation,
+          mode,
+          front,
+          back,
+          title: titleMatch ? titleMatch[1] : front,
+          sections,
+          generatedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        send("error", { message: "Failed to generate explanation" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return sseResponse(stream);
 });
 
-// Batch explanations for multiple cards
-router.post("/batch", validateBody(batchExplainSchema), async (req: Request, res: Response) => {
-  const { cards, mode = "full" } = req.body;
-
+// ── POST /api/explain/batch ──
+explainRoutes.post("/explain/batch", validate(batchExplainSchema), async (c) => {
+  const { cards, mode = "full" } = c.get("validated") as any;
   try {
+    const ai = createAIService(c.env);
     const results = await Promise.all(
       cards.map(async (card: { front: string; back: string }) => {
         if (!card.front || !card.back) {
           return { error: "Missing front or back" };
         }
-        
-        const explanation = await aiService.explainCard(card.front, card.back, mode);
-        return {
-          front: card.front,
-          back: card.back,
-          explanation,
-          mode,
-        };
+        const explanation = await ai.explainCard(card.front, card.back, mode);
+        return { front: card.front, back: card.back, explanation, mode };
       })
     );
-    
-    res.json({
-      results,
-      count: results.length,
-      mode,
-    });
+    return c.json({ results, count: results.length, mode });
   } catch (err) {
-    logger.error({ err }, "Batch explanation failed");
-    res.status(500).json({
-      error: { code: "GENERATION_ERROR", message: "Failed to generate batch explanations" },
-    });
+    return c.json({ error: { code: "GENERATION_ERROR", message: "Failed to generate batch explanations" } }, 500);
   }
 });
-
-export default router;

@@ -1,78 +1,73 @@
-import { Router, Request, Response } from "express";
-import { db, decks, cards, userSettings, generationLogs, studySessions, cardProgress, sqlite } from "../db/index.js";
-import { eq, sql } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import path from "path";
-import fs from "fs";
-import { getConfig, isDevelopment } from "../config.js";
+import { Hono } from "hono";
+import { eq, inArray, sql } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { decks, cards, userSettings, generationLogs, studySessions, cardProgress } from "../db/index";
+import { getDb, getUserId, unauthorized, serverError } from "../lib/helpers";
 
-const router = Router();
+export const backupRoutes = new Hono<AppEnv>();
 
-const BACKUP_DIR = getConfig().BACKUP_PATH;
-
-if (!fs.existsSync(BACKUP_DIR)) {
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+function csvEscape(s: string | null | undefined): string {
+  return `"${(s || "").replace(/"/g, '""')}"`;
 }
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
-
-function generateBackupName(userId: string | null): string {
-  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const userPart = userId ? userId.slice(0, 8) : "guest";
-  return `backup_${userPart}_${ts}.db`;
-}
-
-async function getStorageStats(userId: string | null) {
-  const deckCount = await db.select({ count: sql<number>`count(*)` }).from(decks).where(userId ? eq(decks.userId, userId) : sql`1=1`);
-  const cardCount = await db.select({ count: sql<number>`count(*)` }).from(cards).innerJoin(decks, eq(cards.deckId, decks.id)).where(userId ? eq(decks.userId, userId) : sql`1=1`);
-  const summaryCount = await db.select({ count: sql<number>`count(*)` }).from(generationLogs).where(userId ? eq(generationLogs.userId, userId) : sql`1=1`);
-  const sessionCount = await db.select({ count: sql<number>`count(*)` }).from(studySessions).where(userId ? eq(studySessions.userId, userId) : sql`1=1`);
-
-  const dbPath = getConfig().DATABASE_URL;
-  let storageUsedMb = 0;
-  try {
-    const stat = fs.statSync(dbPath);
-    storageUsedMb = Math.round((stat.size / 1024 / 1024) * 100) / 100;
-  } catch { /* ignore */ }
+// ── GET /storage & /export & /data & /account: fully DB-backed ──
+async function getStorageStats(db: DB, userId: string | null) {
+  const deckCount = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(decks)
+    .where(userId ? eq(decks.userId, userId) : sql`1=1`);
+  const cardCount = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(cards)
+    .innerJoin(decks, eq(cards.deckId, decks.id))
+    .where(userId ? eq(decks.userId, userId) : sql`1=1`);
+  const summaryCount = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(generationLogs)
+    .where(userId ? eq(generationLogs.userId, userId) : sql`1=1`);
+  const sessionCount = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(studySessions)
+    .where(userId ? eq(studySessions.userId, userId) : sql`1=1`);
 
   return {
     totalDecks: Number(deckCount[0]?.count || 0),
     totalCards: Number(cardCount[0]?.count || 0),
     totalSummaries: Number(summaryCount[0]?.count || 0),
     totalStudySessions: Number(sessionCount[0]?.count || 0),
-    storageUsedMb,
+    storageUsedMb: 0,
     storageLimitMb: 10240,
   };
 }
 
-// ── GET /api/user/storage — get storage usage stats ──
-router.get("/storage", async (req: Request, res: Response) => {
+async function handleStorage(c: any) {
   try {
-    const userId = getUserId(req);
-    const stats = await getStorageStats(userId);
-    res.json(stats);
+    const userId = getUserId(c);
+    const stats = await getStorageStats(getDb(c), userId);
+    return c.json(stats);
   } catch (err) {
-    logger.error({ err }, "Failed to get storage stats");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to get storage stats" } });
+    return serverError(c, "Failed to get storage stats");
   }
-});
+}
 
-// ── POST /api/user/export — export user data as JSON ──
-router.post("/export", async (req: Request, res: Response) => {
-  const { format = "json" } = req.body;
-  const userId = getUserId(req);
-
+async function handleExport(c: any) {
   try {
-    if (format === "json") {
-      const userDecks = await db.select().from(decks).where(userId ? eq(decks.userId, userId) : sql`1=1`);
-      const deckIds = userDecks.map(d => d.id);
-      const userCards = deckIds.length > 0
-        ? await db.select().from(cards).where(sql`${cards.deckId} IN (${sql.join(deckIds.map(id => sql`${id}`), sql`,`)})`)
-        : [];
-      const settings = await db.select().from(userSettings).where(eq(userSettings.userId, userId || ""));
+    let body: any = {};
+    try { body = await c.req.json(); } catch { /* no body */ }
+    const { format = "json" } = body as { format?: string };
+    const userId = getUserId(c);
+    const db = getDb(c);
 
+    const userDecks = await db.select().from(decks).where(userId ? eq(decks.userId, userId) : sql`1=1`);
+    const deckIds = userDecks.map((d) => d.id);
+    const userCards =
+      deckIds.length > 0
+        ? await db.select().from(cards).where(inArray(cards.deckId, deckIds))
+        : [];
+
+    if (format === "json") {
+      const settings = await db.select().from(userSettings).where(eq(userSettings.userId, userId || ""));
       const exportData = {
         version: 1,
         exportedAt: new Date().toISOString(),
@@ -82,270 +77,123 @@ router.post("/export", async (req: Request, res: Response) => {
         decks: userDecks,
         cards: userCards,
       };
-
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Content-Disposition", `attachment; filename="ankigen-export-${Date.now()}.json"`);
-      res.json(exportData);
-      return;
+      return c.json(exportData);
     }
 
     if (format === "csv") {
-      const userDecks = await db.select().from(decks).where(userId ? eq(decks.userId, userId) : sql`1=1`);
-      const deckIds = userDecks.map(d => d.id);
-      const userCards = deckIds.length > 0
-        ? await db.select().from(cards).where(sql`${cards.deckId} IN (${sql.join(deckIds.map(id => sql`${id}`), sql`,`)})`)
-        : [];
-
       const header = "deck_name,front,back,tags,card_type,choices,correct_index";
-       const rows = userCards.map(c => {
-         const deck = userDecks.find(d => d.id === c.deckId);
-         const escape = (s: string | null | undefined) => `"${(s || "").replace(/"/g, '""')}"`;
-         return `${escape(deck?.name)},${escape(c.front)},${escape(c.back)},${escape(c.tags)},${c.cardType},"${(c.choices || "").replace(/"/g, '""')}",${c.correctIndex ?? ""}`;
-       });
-
+      const rows = userCards.map((card) => {
+        const deck = userDecks.find((d) => d.id === card.deckId);
+        return `${csvEscape(deck?.name)},${csvEscape(card.front)},${csvEscape(card.back)},${csvEscape(card.tags)},${card.cardType},${csvEscape(card.choices)},${card.correctIndex ?? ""}`;
+      });
       const csv = [header, ...rows].join("\n");
-      res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", `attachment; filename="ankigen-export-${Date.now()}.csv"`);
-      res.send(csv);
-      return;
+      c.header("Content-Type", "text/csv");
+      c.header("Content-Disposition", `attachment; filename="mednexus-export-${Date.now()}.csv"`);
+      return c.body(csv);
     }
 
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Unsupported format" } });
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Unsupported format" } }, 400);
   } catch (err) {
-    logger.error({ err }, "Failed to export data");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to export data" } });
+    return serverError(c, "Failed to export data");
   }
-});
+}
 
-// ── POST /api/user/import ──
-router.post("/import", async (req: Request, res: Response) => {
-  res.status(501).json({ error: { code: "NOT_IMPLEMENTED", message: "Import via /api/user/import is deprecated. Use /api/decks/:id/import or POST /api/backup/restore." } });
-});
+async function handleImport(c: any) {
+  return c.json(
+    {
+      error: {
+        code: "NOT_IMPLEMENTED",
+        message: "Import via /api/.../import is deprecated. Use /api/decks/:id/import or POST /api/backup/restore.",
+      },
+    },
+    501,
+  );
+}
 
-// ── POST /api/backup/create ──
-router.post("/create", async (req: Request, res: Response) => {
+async function handleDeleteData(c: any) {
   try {
-    const userId = getUserId(req);
-    const backupName = generateBackupName(userId);
-    const backupPath = path.join(BACKUP_DIR, backupName);
-
-    await new Promise<void>((resolve, reject) => {
-      sqlite.backup(backupPath).then(() => resolve()).catch(reject);
-    });
-
-    const stat = fs.statSync(backupPath);
-    const backupInfo = {
-      id: backupName.replace(".db", ""),
-      name: backupName,
-      size: stat.size,
-      createdAt: new Date().toISOString(),
-      userId: userId,
-    };
-
-    logger.info({ backup: backupName, userId }, "Backup created successfully");
-    res.status(201).json(backupInfo);
-  } catch (err) {
-    logger.error({ err }, "Failed to create backup");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to create backup" } });
-  }
-});
-
-// ── GET /api/backup/list ──
-router.get("/list", async (_req: Request, res: Response) => {
-  try {
-    const files = fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith(".db")).map(f => {
-      const filePath = path.join(BACKUP_DIR, f);
-      const stat = fs.statSync(filePath);
-      return {
-        id: f.replace(".db", ""),
-        name: f,
-        size: stat.size,
-        createdAt: stat.mtime.toISOString(),
-      };
-    }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    res.json({ backups: files });
-  } catch (err) {
-    logger.error({ err }, "Failed to list backups");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list backups" } });
-  }
-});
-
-// ── GET /api/backup/download/:name ──
-router.get("/download/:name", (req: Request, res: Response) => {
-  const name = req.params.name;
-  if (!name.endsWith(".db") || name.includes("..") || name.includes("/")) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid backup name" } });
-    return;
-  }
-
-  const filePath = path.join(BACKUP_DIR, name);
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: { code: "NOT_FOUND", message: "Backup not found" } });
-    return;
-  }
-
-  res.setHeader("Content-Type", "application/x-sqlite3");
-  res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
-  const stream = fs.createReadStream(filePath);
-  stream.pipe(res);
-});
-
-// ── POST /api/backup/restore ──
-router.post("/restore", async (req: Request, res: Response) => {
-  if (!req.isAuthenticated()) {
-    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Authentication required for backup restore" } });
-    return;
-  }
-
-  const adminKey = req.headers["x-admin-key"];
-  const secret = getConfig().ADMIN_SECRET_KEY;
-  if (!secret || adminKey !== secret) {
-    res.status(403).json({ error: { code: "FORBIDDEN", message: "Admin access required for backup restore" } });
-    return;
-  }
-
-  const { backupId } = req.body;
-  if (!backupId) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "backupId is required" } });
-    return;
-  }
-
-  const name = backupId.endsWith(".db") ? backupId : `${backupId}.db`;
-  if (name.includes("..") || name.includes("/")) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid backup ID" } });
-    return;
-  }
-
-  const filePath = path.join(BACKUP_DIR, name);
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: { code: "NOT_FOUND", message: "Backup not found" } });
-    return;
-  }
-
-  try {
-    const Database = (await import("better-sqlite3")).default;
-    const restoreDb = new Database(filePath);
-    const tableCount = restoreDb.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table'").get() as { c: number };
-    restoreDb.close();
-
-    if (tableCount.c < 5) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid backup file" } });
-      return;
-    }
-
-    res.json({
-      success: true,
-      message: "Restore initiated. The server will restart with the restored data.",
-      backupId,
-    });
-
-    logger.info({ backupId }, "Restore requested, will apply on next restart");
-
-    setTimeout(() => {
-      try {
-        const currentDbPath = getConfig().DATABASE_URL;
-        const currentBackupPath = `${currentDbPath}.pre-restore-${Date.now()}`;
-        fs.copyFileSync(currentDbPath, currentBackupPath);
-        fs.copyFileSync(filePath, currentDbPath);
-        logger.info({ backupId, currentDbPath }, "Backup restored successfully");
-        if (isDevelopment()) {
-          logger.info("Development mode: skipping process.exit, server continues running");
-        } else {
-          process.exit(0);
-        }
-      } catch (err) {
-        logger.error({ err }, "Failed to restore backup");
-      }
-    }, 1000);
-  } catch (err) {
-    logger.error({ err }, "Failed to validate backup");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to restore backup" } });
-  }
-});
-
-// ── DELETE /api/user/data — delete all user data ──
-router.delete("/data", async (req: Request, res: Response) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Must be logged in" } });
-      return;
-    }
-
+    const userId = getUserId(c);
+    if (!userId) return unauthorized(c);
+    const db = getDb(c);
     const userDecks = await db.select().from(decks).where(eq(decks.userId, userId));
-    const deckIds = userDecks.map(d => d.id);
-
+    const deckIds = userDecks.map((d) => d.id);
     if (deckIds.length > 0) {
-      await db.delete(cards).where(sql`${cards.deckId} IN (${sql.join(deckIds.map(id => sql`${id}`), sql`,`)})`);
+      await db.delete(cards).where(inArray(cards.deckId, deckIds));
       await db.delete(decks).where(eq(decks.userId, userId));
     }
-
     await db.delete(studySessions).where(eq(studySessions.userId, userId));
     await db.delete(generationLogs).where(eq(generationLogs.userId, userId));
     await db.delete(cardProgress).where(eq(cardProgress.userId, userId));
-
-    logger.info({ userId }, "User data deleted");
-    res.json({ success: true, message: "All user data deleted" });
+    return c.json({ success: true, message: "All user data deleted" });
   } catch (err) {
-    logger.error({ err }, "Failed to delete user data");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete user data" } });
+    return serverError(c, "Failed to delete user data");
   }
-});
+}
 
-// ── DELETE /api/user/account — delete account ──
-router.delete("/account", async (req: Request, res: Response) => {
+async function handleDeleteAccount(c: any) {
   try {
-    const userId = getUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Must be logged in" } });
-      return;
-    }
-
+    const userId = getUserId(c);
+    if (!userId) return unauthorized(c);
+    const db = getDb(c);
     const userDecks = await db.select().from(decks).where(eq(decks.userId, userId));
-    const deckIds = userDecks.map(d => d.id);
-
+    const deckIds = userDecks.map((d) => d.id);
     if (deckIds.length > 0) {
-      await db.delete(cards).where(sql`${cards.deckId} IN (${sql.join(deckIds.map(id => sql`${id}`), sql`,`)})`);
+      await db.delete(cards).where(inArray(cards.deckId, deckIds));
       await db.delete(decks).where(eq(decks.userId, userId));
     }
-
     await db.delete(studySessions).where(eq(studySessions.userId, userId));
     await db.delete(generationLogs).where(eq(generationLogs.userId, userId));
     await db.delete(cardProgress).where(eq(cardProgress.userId, userId));
     await db.delete(userSettings).where(eq(userSettings.userId, userId));
-
-    logger.info({ userId }, "Account deleted");
-    res.json({ success: true, message: "Account deleted" });
+    return c.json({ success: true, message: "Account deleted" });
   } catch (err) {
-    logger.error({ err }, "Failed to delete account");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete account" } });
+    return serverError(c, "Failed to delete account");
   }
-});
+}
 
-// ── DELETE /api/backup/:name ──
-router.delete("/:name", (req: Request, res: Response) => {
-  const name = req.params.name;
-  const dbName = name.endsWith(".db") ? name : `${name}.db`;
-  if (!dbName.startsWith("backup_") || dbName.includes("..") || dbName.includes("/")) {
-    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid backup name" } });
-    return;
-  }
+// ── File/process-based endpoints: STUBBED (no local filesystem on Workers) ──
+function stubFileOp(c: any, op: string) {
+  return c.json(
+    {
+      error: {
+        code: "NOT_SUPPORTED",
+        message: `${op} is not available on this deployment (requires local filesystem access).`,
+      },
+    },
+    501,
+  );
+}
 
-  const filePath = path.join(BACKUP_DIR, dbName);
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: { code: "NOT_FOUND", message: "Backup not found" } });
-    return;
-  }
+async function handleCreate(c: any) {
+  return stubFileOp(c, "Backup creation");
+}
+async function handleList(c: any) {
+  return stubFileOp(c, "Backup listing");
+}
+async function handleDownload(c: any) {
+  return stubFileOp(c, "Backup download");
+}
+async function handleRestore(c: any) {
+  return stubFileOp(c, "Backup restore");
+}
+async function handleDeleteName(c: any) {
+  return stubFileOp(c, "Backup deletion");
+}
 
-  try {
-    fs.unlinkSync(filePath);
-    logger.info({ backup: name }, "Backup deleted");
-    res.json({ success: true, message: "Backup deleted" });
-  } catch (err) {
-    logger.error({ err }, "Failed to delete backup");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete backup" } });
-  }
-});
+// Register the full set of routes under BOTH /backup and /user prefixes
+// (the original router was mounted at both in routes/index.ts).
+function registerBackup(r: Hono<AppEnv>, prefix: string) {
+  r.get(`${prefix}/storage`, handleStorage);
+  r.post(`${prefix}/export`, handleExport);
+  r.post(`${prefix}/import`, handleImport);
+  r.post(`${prefix}/create`, handleCreate);
+  r.get(`${prefix}/list`, handleList);
+  r.get(`${prefix}/download/:name`, handleDownload);
+  r.post(`${prefix}/restore`, handleRestore);
+  r.delete(`${prefix}/data`, handleDeleteData);
+  r.delete(`${prefix}/account`, handleDeleteAccount);
+  r.delete(`${prefix}/:name`, handleDeleteName);
+}
 
-export default router;
+registerBackup(backupRoutes, "/backup");
+registerBackup(backupRoutes, "/user");

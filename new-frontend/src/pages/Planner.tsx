@@ -765,7 +765,7 @@ function SessionDetailPanel({ plan, onClose, onToggle, onDelete, onChanged }: {
           animate={{ opacity: 1, x: 0 }}
           exit={{ opacity: 0, x: 300 }}
           transition={smoothTransition}
-          className="fixed right-0 top-0 bottom-0 w-full max-w-sm z-50 p-4 overflow-y-auto"
+          className="fixed right-0 top-0 bottom-0 w-full max-w-sm z-[100] p-4 overflow-y-auto"
           style={{ background: 'var(--bg-surface)', backdropFilter: 'blur(40px)', borderLeft: '1px solid var(--border-default)' }}
         >
           <div className="flex items-center justify-between mb-6">
@@ -1862,7 +1862,7 @@ export default function Planner() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100]"
             onClick={() => setSelectedSession(null)}
           />
         )}

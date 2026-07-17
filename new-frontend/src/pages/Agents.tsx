@@ -61,6 +61,7 @@ const agentHealthData: Record<string, { responseTime: string; uptime: string; la
   "/group-study": { responseTime: "200ms", uptime: "99.0%", lastIncident: "1 week ago", status: "healthy" },
   "/deck/1/doctor": { responseTime: "310ms", uptime: "99.8%", lastIncident: "3 days ago", status: "healthy" },
   "/articles": { responseTime: "1.8s", uptime: "98.2%", lastIncident: "5 days ago", status: "degraded" },
+  "/studypilot": { responseTime: "90ms", uptime: "100%", lastIncident: "never", status: "healthy" },
 };
 
 const agentIOData: Record<string, { input: string; output: string }> = {
@@ -75,6 +76,7 @@ const agentIOData: Record<string, { input: string; output: string }> = {
   "/group-study": { input: "Room ID or create new room", output: "Shared quiz session with peers" },
   "/deck/1/doctor": { input: "Deck ID to analyze", output: "Health report + fix suggestions" },
   "/articles": { input: "Deck topics & material", output: "Long-form article with LaTeX + quizzes" },
+  "/studypilot": { input: "Paste notes, PDF, or image", output: "Module decks + deadline-driven schedule" },
 };
 
 const workflows = [
@@ -313,6 +315,22 @@ const agents: Agent[] = [
     healthUptime: "98.2%",
     healthLastIncident: "5 days ago",
     healthStatus: "degraded",
+  },
+  {
+    to: "/studypilot", icon: GraduationCap, label: "StudyPilot",
+    desc: "Turn notes, PDFs, and images into a deadline-driven study plan",
+    longDesc: "Heuristic planner (no AI): splits your material into flashcards, clusters them into modules, and builds a spaced-repetition schedule that finishes before your deadline.",
+    color: "#A855F7", featured: false, status: "online", category: "tools",
+    tags: ["Heuristic", "Planning", "Spaced repetition"], usageCount: 64, lastUsed: "1d ago",
+    examplePrompt: "Plan 3 weeks of cell biology before my exam",
+    quickActionLabel: "Open StudyPilot", quickActionIcon: Wand2,
+    emptyStateMessage: "Paste notes, upload a PDF, or OCR an image to get started.",
+    inputDescription: "Paste notes, PDF, or image (OCR)",
+    outputDescription: "Module decks + deadline-driven schedule",
+    healthResponseTime: "90ms",
+    healthUptime: "100%",
+    healthLastIncident: "never",
+    healthStatus: "healthy",
   },
 ];
 
@@ -696,7 +714,7 @@ function AgentCard({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
             style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
             onClick={() => setShowQuickAction(false)}
           >
@@ -787,7 +805,7 @@ function AgentCard({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
             style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
             onClick={() => setShowPreview(false)}
           >
@@ -1240,7 +1258,7 @@ function CompareModal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4"
       style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
       onClick={onClose}
     >
@@ -1346,17 +1364,26 @@ function CompareModal({
 }
 
 function RecentActivityFeed({ onAgentClick }: { onAgentClick: (agent: Agent) => void }) {
-  const [recentAgents, setRecentAgents] = useState<{ agent: Agent; timestamp: string }[]>([]);
+  const [recentAgents, setRecentAgents] = useState<{ agent: Agent; timestamp: string; timeAgo: string }[]>([]);
 
   useEffect(() => {
     const stored = localStorage.getItem("recent-agents");
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
+        const timeAgo = (ts: string) => {
+          const diff = Date.now() - new Date(ts).getTime();
+          const minutes = Math.floor(diff / 60000);
+          if (minutes < 1) return "Just now";
+          if (minutes < 60) return `${minutes}m ago`;
+          const hours = Math.floor(minutes / 60);
+          if (hours < 24) return `${hours}h ago`;
+          return `${Math.floor(hours / 24)}d ago`;
+        };
         const withAgents = parsed
           .map((item: { agentId: string; timestamp: string }) => {
             const agent = agents.find((a) => a.to === item.agentId);
-            return agent ? { agent, timestamp: item.timestamp } : null;
+            return agent ? { agent, timestamp: item.timestamp, timeAgo: timeAgo(item.timestamp) } : null;
           })
           .filter(Boolean)
           .slice(0, 5);
@@ -1370,24 +1397,13 @@ function RecentActivityFeed({ onAgentClick }: { onAgentClick: (agent: Agent) => 
   const handleClick = (agent: Agent) => {
     const newRecent = [
       { agentId: agent.to, timestamp: new Date().toISOString() },
-      ...(recentAgents.map((r) => ({ agentId: r.agent.to, timestamp: r.timestamp })).filter((r) => r.agentId !== agent.to)),
+      ...(recentAgents.map((r) => ({ agentId: r.agent.to, timestamp: r.timestamp }))).filter((r) => r.agentId !== agent.to),
     ].slice(0, 10);
     localStorage.setItem("recent-agents", JSON.stringify(newRecent));
     onAgentClick(agent);
   };
 
   if (recentAgents.length === 0) return null;
-
-  const formatTime = (timestamp: string) => {
-    const diff = Date.now() - new Date(timestamp).getTime();
-    const minutes = Math.floor(diff / 60000);
-    if (minutes < 1) return "Just now";
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
-  };
 
   return (
     <motion.div
@@ -1403,7 +1419,7 @@ function RecentActivityFeed({ onAgentClick }: { onAgentClick: (agent: Agent) => 
         </p>
       </div>
       <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
-        {recentAgents.map(({ agent, timestamp }) => {
+        {recentAgents.map(({ agent, timeAgo }) => {
           const Icon = agent.icon;
           return (
             <Link
@@ -1435,7 +1451,7 @@ function RecentActivityFeed({ onAgentClick }: { onAgentClick: (agent: Agent) => 
               </div>
               <div>
                 <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>{agent.label}</p>
-                <p className="text-xs" style={{ color: "var(--text-muted)" }}>{formatTime(timestamp)}</p>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>{timeAgo}</p>
               </div>
             </Link>
           );
@@ -1451,41 +1467,38 @@ function TimeBasedBanner() {
 
   if (dismissed) return null;
 
-  let banner: { icon: typeof Sun; text: string; suggestion: string; agentTo: string; color: string } | null = null;
-
-  if (hour >= 6 && hour < 12) {
-    banner = {
-      icon: Coffee,
-      text: "Good morning! Start your day with a quick review session",
-      suggestion: "Try Smart Review",
-      agentTo: "/smart-review",
-      color: "#3B82F6",
-    };
-  } else if (hour >= 12 && hour < 18) {
-    banner = {
-      icon: Sun,
-      text: "Afternoon study boost? Try Voice Tutor for hands-free learning",
-      suggestion: "Try Voice Tutor",
-      agentTo: "/voice-study",
-      color: "#10B981",
-    };
-  } else if (hour >= 18 && hour < 22) {
-    banner = {
-      icon: MoonIcon,
-      text: "Wind down with some mnemonics or a quick chat",
-      suggestion: "Try Mnemonics",
-      agentTo: "/mnemonics",
-      color: "#A855F7",
-    };
-  } else {
-    banner = {
-      icon: Moon,
-      text: "Late night study? Exam Simulator is ready when you are",
-      suggestion: "Try Exam Simulator",
-      agentTo: "/exam",
-      color: "#F59E0B",
-    };
-  }
+  const banner: { icon: typeof Sun; text: string; suggestion: string; agentTo: string; color: string } | null =
+    hour >= 6 && hour < 12
+      ? {
+          icon: Coffee,
+          text: "Good morning! Start your day with a quick review session",
+          suggestion: "Try Smart Review",
+          agentTo: "/smart-review",
+          color: "#3B82F6",
+        }
+      : hour >= 12 && hour < 18
+        ? {
+            icon: Sun,
+            text: "Afternoon study boost? Try Voice Tutor for hands-free learning",
+            suggestion: "Try Voice Tutor",
+            agentTo: "/voice-study",
+            color: "#10B981",
+          }
+        : hour >= 18 && hour < 22
+          ? {
+              icon: MoonIcon,
+              text: "Wind down with some mnemonics or a quick chat",
+              suggestion: "Try Mnemonics",
+              agentTo: "/mnemonics",
+              color: "#A855F7",
+            }
+          : {
+              icon: Moon,
+              text: "Late night study? Exam Simulator is ready when you are",
+              suggestion: "Try Exam Simulator",
+              agentTo: "/exam",
+              color: "#F59E0B",
+            };
 
   if (!banner) return null;
 

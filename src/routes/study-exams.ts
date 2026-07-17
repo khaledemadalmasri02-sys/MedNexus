@@ -1,21 +1,22 @@
-import { Router, Request, Response } from "express";
-import { db, studyExams } from "../db/index.js";
-import { eq, and, isNull, desc } from "drizzle-orm";
-import { logger } from "../lib/logger.js";
-import { validateBody } from "../middleware/validate.js";
-import { createExamSchema, updateExamSchema } from "./validators.js";
+import { Hono } from "hono";
+import { eq, and, isNull, asc } from "drizzle-orm";
+import { z } from "zod";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { studyExams } from "../db/index";
+import { validate } from "../middleware/validate";
+import { logger } from "../lib/logger";
 
-const router = Router();
+export const studyExamRoutes = new Hono<AppEnv>();
 
-function getUserId(req: Request): string | null {
-  return req.isAuthenticated() ? req.user!.id : null;
-}
+function getDb(c: any): DB { return c.get("db"); }
+function getUserId(c: any): string | null { return c.get("user")?.id ?? null; }
 
 function ownerFilter(userId: string | null) {
   return userId ? eq(studyExams.userId, userId) : isNull(studyExams.userId);
 }
 
-async function getExamById(examId: number, userId: string | null) {
+async function getExamById(db: DB, examId: number, userId: string | null) {
   const exam = await db.query.studyExams.findFirst({ where: eq(studyExams.id, examId) });
   if (!exam) return null;
   if (userId && exam.userId !== userId) return null;
@@ -23,28 +24,42 @@ async function getExamById(examId: number, userId: string | null) {
   return exam;
 }
 
-// ── GET /api/study-exams — list exams (soonest first) ──
-router.get("/", async (req: Request, res: Response) => {
+const createExamSchema = z.object({
+  title: z.string().min(1).max(200),
+  subject: z.string().max(200).optional(),
+  examDate: z.string().datetime(),
+  color: z.string().max(20).optional(),
+});
+
+const updateExamSchema = z.object({
+  title: z.string().min(1).max(200).optional(),
+  subject: z.string().max(200).optional(),
+  examDate: z.string().datetime().optional(),
+  color: z.string().max(20).optional(),
+});
+
+// ── GET /api/study-exams ──
+studyExamRoutes.get("/study-exams", async (c) => {
   try {
-    const userId = getUserId(req);
-    const exams = await db.query.studyExams.findMany({
+    const userId = getUserId(c);
+    const exams = await getDb(c).query.studyExams.findMany({
       where: ownerFilter(userId),
-      orderBy: (row, { asc }) => asc(row.examDate),
+      orderBy: (studyExams, { asc: a }) => a(studyExams.examDate),
     });
-    res.json(exams);
+    return c.json(exams);
   } catch (err) {
     logger.error({ err }, "Failed to list exams");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to list exams" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to list exams" } }, 500);
   }
 });
 
 // ── POST /api/study-exams ──
-router.post("/", validateBody(createExamSchema), async (req: Request, res: Response) => {
+studyExamRoutes.post("/study-exams", validate(createExamSchema), async (c) => {
   try {
-    const userId = getUserId(req);
-    const { title, subject, examDate, color } = req.body;
+    const userId = getUserId(c);
+    const { title, subject, examDate, color } = c.get("validated") as any;
 
-    const [exam] = await db.insert(studyExams).values({
+    const [exam] = await getDb(c).insert(studyExams).values({
       userId,
       title,
       subject: subject || null,
@@ -54,32 +69,30 @@ router.post("/", validateBody(createExamSchema), async (req: Request, res: Respo
       updatedAt: new Date(),
     }).returning();
 
-    res.status(201).json(exam);
+    return c.json(exam, 201);
   } catch (err) {
     logger.error({ err }, "Failed to create exam");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to create exam" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to create exam" } }, 500);
   }
 });
 
 // ── PATCH /api/study-exams/:id ──
-router.patch("/:id", validateBody(updateExamSchema), async (req: Request, res: Response) => {
+studyExamRoutes.patch("/study-exams/:id", validate(updateExamSchema), async (c) => {
   try {
-    const userId = getUserId(req);
-    const examId = parseInt(req.params.id, 10);
+    const userId = getUserId(c);
+    const examId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(examId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
     }
 
-    const existing = await getExamById(examId, userId);
+    const existing = await getExamById(getDb(c), examId, userId);
     if (!existing) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Exam not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Exam not found" } }, 404);
     }
 
-    const { title, subject, examDate, color } = req.body;
+    const { title, subject, examDate, color } = c.get("validated") as any;
 
-    const [updated] = await db.update(studyExams).set({
+    const [updated] = await getDb(c).update(studyExams).set({
       title: title ?? existing.title,
       subject: subject !== undefined ? subject : existing.subject,
       examDate: examDate ? new Date(examDate) : existing.examDate,
@@ -87,35 +100,31 @@ router.patch("/:id", validateBody(updateExamSchema), async (req: Request, res: R
       updatedAt: new Date(),
     }).where(and(eq(studyExams.id, examId), ownerFilter(userId))).returning();
 
-    res.json(updated);
+    return c.json(updated);
   } catch (err) {
     logger.error({ err }, "Failed to update exam");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to update exam" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to update exam" } }, 500);
   }
 });
 
 // ── DELETE /api/study-exams/:id ──
-router.delete("/:id", async (req: Request, res: Response) => {
+studyExamRoutes.delete("/study-exams/:id", async (c) => {
   try {
-    const userId = getUserId(req);
-    const examId = parseInt(req.params.id, 10);
+    const userId = getUserId(c);
+    const examId = parseInt(c.req.param("id") ?? "", 10);
     if (isNaN(examId)) {
-      res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } });
-      return;
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "Invalid ID" } }, 400);
     }
 
-    const existing = await getExamById(examId, userId);
+    const existing = await getExamById(getDb(c), examId, userId);
     if (!existing) {
-      res.status(404).json({ error: { code: "NOT_FOUND", message: "Exam not found" } });
-      return;
+      return c.json({ error: { code: "NOT_FOUND", message: "Exam not found" } }, 404);
     }
 
-    await db.delete(studyExams).where(and(eq(studyExams.id, examId), ownerFilter(userId)));
-    res.status(204).send();
+    await getDb(c).delete(studyExams).where(and(eq(studyExams.id, examId), ownerFilter(userId)));
+    return new Response(null, { status: 204 });
   } catch (err) {
     logger.error({ err }, "Failed to delete exam");
-    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete exam" } });
+    return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to delete exam" } }, 500);
   }
 });
-
-export default router;

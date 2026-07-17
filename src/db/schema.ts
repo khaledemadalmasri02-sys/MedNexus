@@ -13,8 +13,8 @@ export const users = sqliteTable("users", {
   authProvider: text("auth_provider").default("local"),
   oauthProviderId: text("oauth_provider_id"),
   passwordHash: text("password_hash"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Sessions table
@@ -22,11 +22,11 @@ export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
   data: text("data").notNull(),
-  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
-// Decks table (self-referencing foreign key handled at DB level)
+// Decks table
 export const decks = sqliteTable("decks", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -34,8 +34,8 @@ export const decks = sqliteTable("decks", {
   parentId: integer("parent_id"),
   kind: text("kind").notNull().default("deck"),
   userId: text("user_id").references(() => users.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Cards table
@@ -52,7 +52,6 @@ export const cards = sqliteTable("cards", {
   image: text("image"),
   sourceImage: text("source_image"),
   bbox: text("bbox"),
-  // Pre-generated study mode explanations (stored as JSON)
   explanationFull: text("explanation_full"),
   explanationRevision: text("explanation_revision"),
   explanationOsce: text("explanation_osce"),
@@ -60,9 +59,14 @@ export const cards = sqliteTable("cards", {
   explanationMnemonic: text("explanation_mnemonic"),
   explanationClinical: text("explanation_clinical"),
   explanationTesttrap: text("explanation_testtrap"),
-  explanationsGeneratedAt: integer("explanations_generated_at", { mode: "timestamp" }),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  explanationsGeneratedAt: integer("explanations_generated_at", { mode: "timestamp_ms" }),
+  aiFront: text("ai_front"),
+  aiBack: text("ai_back"),
+  aiExplanation: text("ai_explanation"),
+  aiGenerated: integer("ai_generated", { mode: "boolean" }).notNull().default(false),
+  source: text("source").notNull().default("heuristic"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Question Banks table
@@ -71,8 +75,8 @@ export const qbanks = sqliteTable("qbanks", {
   name: text("name").notNull(),
   parentId: integer("parent_id"),
   userId: text("user_id").references(() => users.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Questions table
@@ -85,8 +89,8 @@ export const questions = sqliteTable("questions", {
   correctIndex: integer("correct_index"),
   tags: text("tags"),
   pageNumber: integer("page_number"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Mind Maps table
@@ -96,8 +100,8 @@ export const mindMaps = sqliteTable("mind_maps", {
   title: text("title").notNull(),
   data: text("data").notNull(),
   userId: text("user_id").references(() => users.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Topics table
@@ -107,7 +111,7 @@ export const topics = sqliteTable("topics", {
   description: text("description"),
   parentId: integer("parent_id"),
   userId: text("user_id").references(() => users.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Feedback table
@@ -117,7 +121,7 @@ export const feedback = sqliteTable("feedback", {
   type: text("type").notNull(),
   message: text("message").notNull(),
   rating: integer("rating"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Generation Logs table
@@ -131,7 +135,7 @@ export const generationLogs = sqliteTable("generation_logs", {
   durationMs: integer("duration_ms"),
   success: integer("success", { mode: "boolean" }).notNull().default(true),
   errorMessage: text("error_message"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Free Tier Usage table
@@ -139,7 +143,7 @@ export const freeTierUsage = sqliteTable("free_tier_usage", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   identifier: text("identifier").notNull().unique(),
   deckCount: integer("deck_count").notNull().default(0),
-  lastResetAt: integer("last_reset_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  lastResetAt: integer("last_reset_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Agent Sessions table
@@ -150,8 +154,8 @@ export const agentSessions = sqliteTable("agent_sessions", {
   workspaceId: text("workspace_id"),
   status: text("status").notNull().default("idle"),
   messages: text("messages").notNull().default("[]"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Terminal Sessions table
@@ -160,8 +164,8 @@ export const terminalSessions = sqliteTable("terminal_sessions", {
   userId: text("user_id"),
   workspaceId: text("workspace_id").notNull(),
   status: text("status").notNull().default("active"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  lastActivityAt: integer("last_activity_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  lastActivityAt: integer("last_activity_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Audit Logs table
@@ -173,7 +177,7 @@ export const auditLogs = sqliteTable("audit_logs", {
   resourceId: text("resource_id"),
   details: text("details"),
   ipAddress: text("ip_address"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Error Logs table
@@ -192,27 +196,17 @@ export const errorLogs = sqliteTable("error_logs", {
   resolutionNotes: text("resolution_notes"),
   fixPattern: text("fix_pattern"),
   occurrenceCount: integer("occurrence_count").notNull().default(1),
-  firstSeenAt: integer("first_seen_at", { mode: "timestamp" }).notNull(),
-  lastSeenAt: integer("last_seen_at", { mode: "timestamp" }).notNull(),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  firstSeenAt: integer("first_seen_at", { mode: "timestamp_ms" }).notNull(),
+  lastSeenAt: integer("last_seen_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
-// Type exports
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Deck = typeof decks.$inferSelect;
 export type NewDeck = typeof decks.$inferInsert;
 export type Card = typeof cards.$inferSelect;
 export type NewCard = typeof cards.$inferInsert;
-export type QBank = typeof qbanks.$inferSelect;
-export type Question = typeof questions.$inferSelect;
-export type MindMap = typeof mindMaps.$inferSelect;
-export type Topic = typeof topics.$inferSelect;
-export type Feedback = typeof feedback.$inferSelect;
-export type AgentSession = typeof agentSessions.$inferSelect;
-export type TerminalSession = typeof terminalSessions.$inferSelect;
-export type ErrorLog = typeof errorLogs.$inferSelect;
-export type NewErrorLog = typeof errorLogs.$inferInsert;
 
 // Study Plans table
 export const studyPlans = sqliteTable("study_plans", {
@@ -227,9 +221,9 @@ export const studyPlans = sqliteTable("study_plans", {
   deckId: integer("deck_id").references(() => decks.id),
   recurrence: text("recurrence").notNull().default("none"),
   completed: integer("completed", { mode: "boolean" }).notNull().default(false),
-  completedAt: integer("completed_at", { mode: "timestamp" }),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Study Sessions log table
@@ -238,35 +232,34 @@ export const studySessions = sqliteTable("study_sessions", {
   userId: text("user_id").references(() => users.id),
   planId: integer("plan_id").references(() => studyPlans.id),
   deckId: integer("deck_id").references(() => decks.id),
-  startedAt: integer("started_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  endedAt: integer("ended_at", { mode: "timestamp" }),
+  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  endedAt: integer("ended_at", { mode: "timestamp_ms" }),
   durationMinutes: integer("duration_minutes"),
   cardsStudied: integer("cards_studied").notNull().default(0),
   knownCount: integer("known_count"),
   unknownCount: integer("unknown_count"),
   focusRating: integer("focus_rating"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
-// Type exports
 export type StudyPlan = typeof studyPlans.$inferSelect;
 export type NewStudyPlan = typeof studyPlans.$inferInsert;
 export type StudySession = typeof studySessions.$inferSelect;
 export type NewStudySession = typeof studySessions.$inferInsert;
 
-// Study Exams table — goals with a target date + live countdown
+// Study Exams table
 export const studyExams = sqliteTable("study_exams", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id").references(() => users.id),
   title: text("title").notNull(),
   subject: text("subject"),
-  examDate: integer("exam_date", { mode: "timestamp" }).notNull(),
+  examDate: integer("exam_date", { mode: "timestamp_ms" }).notNull(),
   color: text("color").notNull().default("#06b6d4"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
-// Study Plan Instances table — materialized dated occurrences of recurring plans
+// Study Plan Instances table
 export const studyPlanInstances = sqliteTable("study_plan_instances", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   planId: integer("plan_id").notNull().references(() => studyPlans.id, { onDelete: "cascade" }),
@@ -279,7 +272,7 @@ export const studyPlanInstances = sqliteTable("study_plan_instances", {
   description: text("description"),
   color: text("color").notNull().default("#06b6d4"),
   deckId: integer("deck_id").references(() => decks.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type StudyExam = typeof studyExams.$inferSelect;
@@ -296,9 +289,9 @@ export const studyPlanTemplates = sqliteTable("study_plan_templates", {
   sessions: text("sessions").notNull().default("[]"),
   scheduleType: text("schedule_type").notNull().default("weekly"),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
-  lastGeneratedAt: integer("last_generated_at", { mode: "timestamp" }),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  lastGeneratedAt: integer("last_generated_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Notifications table
@@ -310,8 +303,8 @@ export const notifications = sqliteTable("notifications", {
   message: text("message").notNull(),
   read: integer("read", { mode: "boolean" }).notNull().default(false),
   actionUrl: text("action_url"),
-  scheduledAt: integer("scheduled_at", { mode: "timestamp" }),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  scheduledAt: integer("scheduled_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type StudyPlanTemplate = typeof studyPlanTemplates.$inferSelect;
@@ -326,13 +319,13 @@ export const cardProgress = sqliteTable("card_progress", {
   easeFactor: integer("ease_factor", { mode: "number" }).notNull().default(2.5),
   intervalDays: integer("interval_days").notNull().default(0),
   repetitions: integer("repetitions").notNull().default(0),
-  nextReviewDate: text("next_review_date").notNull().default(sql`(date('now'))`),
-  lastStudiedAt: integer("last_studied_at", { mode: "timestamp" }),
+  nextReviewDate: text("next_review_date").notNull().default(sql`(date('now'))`), // app sets value; SQL function default
+  lastStudiedAt: integer("last_studied_at", { mode: "timestamp_ms" }),
   totalStudiedCount: integer("total_studied_count").notNull().default(0),
   knownCount: integer("known_count").notNull().default(0),
   unknownCount: integer("unknown_count").notNull().default(0),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type CardProgress = typeof cardProgress.$inferSelect;
@@ -344,7 +337,7 @@ export const tags = sqliteTable("tags", {
   name: text("name").notNull(),
   color: text("color").notNull().default("#06B6D4"),
   userId: text("user_id").references(() => users.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 // Deck-Tag junction table
@@ -361,8 +354,6 @@ export const qbankTags = sqliteTable("qbank_tags", {
 
 export type Tag = typeof tags.$inferSelect;
 export type NewTag = typeof tags.$inferInsert;
-export type DeckTag = typeof deckTags.$inferSelect;
-export type QBankTag = typeof qbankTags.$inferSelect;
 
 export const achievements = sqliteTable("achievements", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -371,7 +362,7 @@ export const achievements = sqliteTable("achievements", {
   title: text("title").notNull(),
   description: text("description").notNull(),
   icon: text("icon").notNull(),
-  unlockedAt: integer("unlocked_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  unlockedAt: integer("unlocked_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   seen: integer("seen", { mode: "boolean" }).notNull().default(false),
 });
 
@@ -387,7 +378,7 @@ export const userSettings = sqliteTable("user_settings", {
   dashboardLayout: text("dashboard_layout"),
   density: text("density").notNull().default("comfortable"),
   soundEnabled: integer("sound_enabled", { mode: "boolean" }).notNull().default(false),
-  streakFreezeUsedAt: integer("streak_freeze_used_at", { mode: "timestamp" }),
+  streakFreezeUsedAt: integer("streak_freeze_used_at", { mode: "timestamp_ms" }),
   theme: text("theme").notNull().default("dark"),
   animationsEnabled: integer("animations_enabled", { mode: "boolean" }).notNull().default(true),
   fontSize: text("font_size").notNull().default("medium"),
@@ -424,8 +415,8 @@ export const userSettings = sqliteTable("user_settings", {
   imageAnalyzerEnabled: integer("image_analyzer_enabled", { mode: "boolean" }).notNull().default(true),
   voiceTutorEnabled: integer("voice_tutor_enabled", { mode: "boolean" }).notNull().default(true),
   collaborativeStudyEnabled: integer("collaborative_study_enabled", { mode: "boolean" }).notNull().default(true),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type UserSettings = typeof userSettings.$inferSelect;
@@ -436,24 +427,24 @@ export const milestoneAcknowledgments = sqliteTable("milestone_acknowledgments",
   userId: text("user_id").notNull().references(() => users.id),
   milestoneType: text("milestone_type").notNull(),
   milestoneValue: integer("milestone_value").notNull(),
-  acknowledgedAt: integer("acknowledged_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  acknowledgedAt: integer("acknowledged_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const emailVerificationTokens = sqliteTable("email_verification_tokens", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id").notNull().references(() => users.id),
   token: text("token").notNull().unique(),
-  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const passwordResetTokens = sqliteTable("password_reset_tokens", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id").notNull().references(() => users.id),
   token: text("token").notNull().unique(),
-  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
-  usedAt: integer("used_at", { mode: "timestamp" }),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  usedAt: integer("used_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {
@@ -462,7 +453,7 @@ export const chatMessages = sqliteTable("chat_messages", {
   role: text("role").notNull(),
   content: text("content").notNull(),
   deckContext: text("deck_context"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const agentUsage = sqliteTable("agent_usage", {
@@ -472,7 +463,7 @@ export const agentUsage = sqliteTable("agent_usage", {
   tokensUsed: integer("tokens_used").notNull().default(0),
   durationMs: integer("duration_ms"),
   success: integer("success", { mode: "boolean" }).notNull().default(true),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const exams = sqliteTable("exams", {
@@ -485,9 +476,9 @@ export const exams = sqliteTable("exams", {
   score: integer("score"),
   totalQuestions: integer("total_questions").notNull().default(0),
   durationMinutes: integer("duration_minutes"),
-  startedAt: integer("started_at", { mode: "timestamp" }),
-  completedAt: integer("completed_at", { mode: "timestamp" }),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  startedAt: integer("started_at", { mode: "timestamp_ms" }),
+  completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const groupStudyRooms = sqliteTable("group_study_rooms", {
@@ -498,14 +489,12 @@ export const groupStudyRooms = sqliteTable("group_study_rooms", {
   currentQuestionIndex: integer("current_question_index").notNull().default(0),
   questions: text("questions").notNull().default("[]"),
   participants: text("participants").notNull().default("[]"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type ChatMessage = typeof chatMessages.$inferSelect;
 export type NewChatMessage = typeof chatMessages.$inferInsert;
-export type AgentUsage = typeof agentUsage.$inferSelect;
-export type NewAgentUsage = typeof agentUsage.$inferInsert;
 export type Exam = typeof exams.$inferSelect;
 export type NewExam = typeof exams.$inferInsert;
 export type GroupStudyRoom = typeof groupStudyRooms.$inferSelect;
@@ -524,8 +513,8 @@ export const supportKnowledge = sqliteTable("support_knowledge", {
   notHelpfulCount: integer("not_helpful_count").notNull().default(0),
   isPinned: integer("is_pinned", { mode: "boolean" }).notNull().default(false),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const supportConversations = sqliteTable("support_conversations", {
@@ -535,8 +524,8 @@ export const supportConversations = sqliteTable("support_conversations", {
   status: text("status").notNull().default("active"),
   rating: integer("rating"),
   feedback: text("feedback"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const supportMessages = sqliteTable("support_messages", {
@@ -546,7 +535,7 @@ export const supportMessages = sqliteTable("support_messages", {
   content: text("content").notNull(),
   source: text("source").default("knowledge"),
   knowledgeId: integer("knowledge_id").references(() => supportKnowledge.id),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type SupportKnowledge = typeof supportKnowledge.$inferSelect;
@@ -566,8 +555,8 @@ export const agentKnowledge = sqliteTable("agent_knowledge", {
   priority: integer("priority").notNull().default(0),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   usageCount: integer("usage_count").notNull().default(0),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const agentResponseCache = sqliteTable("agent_response_cache", {
@@ -579,9 +568,9 @@ export const agentResponseCache = sqliteTable("agent_response_cache", {
   source: text("source").notNull().default("ai"),
   confidence: integer("confidence", { mode: "number" }).notNull().default(0.8),
   hitCount: integer("hit_count").notNull().default(1),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  lastHitAt: integer("last_hit_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  lastHitAt: integer("last_hit_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export const agentCacheAnalytics = sqliteTable("agent_cache_analytics", {
@@ -606,9 +595,76 @@ export const articleJobs = sqliteTable("article_jobs", {
   outline: text("outline"),
   contentMarkdown: text("content_markdown"),
   error: text("error"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
 export type ArticleJob = typeof articleJobs.$inferSelect;
 export type NewArticleJob = typeof articleJobs.$inferInsert;
+
+// Summaries table — stores text/PDF uploads and their AI or auto-extracted summaries.
+export const summaries = sqliteTable("summaries", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").references(() => users.id),
+  title: text("title"),
+  style: text("style"),
+  sourceText: text("source_text"),
+  summaryMarkdown: text("summary_markdown"),
+  summaryJson: text("summary_json"),
+  status: text("status").notNull().default("pending"),
+  error: text("error"),
+  wordCount: integer("word_count"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type Summary = typeof summaries.$inferSelect;
+
+// StudyPilot plans — deadline-driven daily schedule + module(deck)→order map.
+// Modules are existing `decks` rows; this table records the generated plan only.
+export const studypilotPlans = sqliteTable("studypilot_plans", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").references(() => users.id),
+  title: text("title").notNull(),
+  dailyMinutes: integer("daily_minutes").notNull(),
+  deadline: integer("deadline", { mode: "timestamp_ms" }).notNull(),
+  scheduleJson: text("schedule_json").notNull(), // module order + per-day deck/card assignment
+  moduleDeckIds: text("module_deck_ids").notNull(), // JSON array of deck ids, order = study order
+  generatedAt: integer("generated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type StudyPilotPlan = typeof studypilotPlans.$inferSelect;
+export type NewSummary = typeof summaries.$inferInsert;
+
+// StudyPilot Library — curated, read-only decks seeded by admins. Cloning deep-copies
+// into the user's own `decks`/`cards`. Kept separate so user-scoped queries stay clean.
+export const libraryDecks = sqliteTable("library_decks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  description: text("description"),
+  category: text("category").notNull().default("general"),
+  tags: text("tags"),
+  difficulty: text("difficulty"), // easy|medium|hard, nullable
+  cardCount: integer("card_count").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+});
+
+export const libraryCards = sqliteTable("library_cards", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  libraryDeckId: integer("library_deck_id").notNull().references(() => libraryDecks.id, { onDelete: "cascade" }),
+  front: text("front").notNull(),
+  back: text("back").notNull(),
+  tags: text("tags"),
+  cardType: text("card_type").notNull().default("basic"),
+  difficulty: text("difficulty"), // easy|medium|hard, nullable
+  aiFront: text("ai_front"),
+  aiBack: text("ai_back"),
+  aiExplanation: text("ai_explanation"),
+  source: text("source").notNull().default("heuristic"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+});
+
+export type LibraryDeck = typeof libraryDecks.$inferSelect;
+export type NewLibraryDeck = typeof libraryDecks.$inferInsert;
+export type LibraryCard = typeof libraryCards.$inferSelect;
+export type NewLibraryCard = typeof libraryCards.$inferInsert;

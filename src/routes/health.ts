@@ -1,81 +1,68 @@
-import { Router, Request, Response } from "express";
-import { db } from "../db/index.js";
-import { logger } from "../lib/logger.js";
-import { getConfig } from "../config.js";
+import { Hono } from "hono";
 import { sql } from "drizzle-orm";
+import type { AppEnv } from "../types";
+import type { DB } from "../db/index";
+import { getConfig } from "../lib/config";
 
-const router = Router();
+export const healthRoutes = new Hono<AppEnv>();
 
-// Basic health check
-router.get("/healthz", async (_req: Request, res: Response) => {
+function getDb(c: any): DB { return c.get("db"); }
+
+const healthz = async (c: any) => {
   try {
-    // Check database connectivity
-    await db.run(sql`SELECT 1`);
-    
-    res.json({
-      status: "ok",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      environment: getConfig().NODE_ENV,
-    });
+    await getDb(c).run(sql`SELECT 1`);
+    return c.json({ status: "ok", timestamp: new Date().toISOString() });
   } catch (err) {
-    logger.error({ err }, "Health check failed");
-    res.status(503).json({
-      status: "error",
-      message: "Database connection failed",
-    });
+    return c.json({ status: "error", message: "Database connection failed" }, 503);
   }
-});
+};
 
-// Detailed health check
-router.get("/health", async (_req: Request, res: Response) => {
-  const checks: Record<string, { status: string; latency?: number; providers?: string[] }> = {};
-  
-  // Database check
+const health = async (c: any) => {
+  const checks: Record<string, any> = {};
   const dbStart = Date.now();
   try {
-    await db.run(sql`SELECT 1`);
+    await getDb(c).run(sql`SELECT 1`);
     checks.database = { status: "ok", latency: Date.now() - dbStart };
-  } catch (err) {
+  } catch {
     checks.database = { status: "error" };
-    logger.error({ err }, "Database health check failed");
   }
-  
-  // AI provider check (if configured)
+  const cfg = getConfig(c.env);
   const aiProviders: string[] = [];
-  if (process.env.OPENROUTER_API_KEY) aiProviders.push("openrouter");
-  if (process.env.OPENAI_API_KEY) aiProviders.push("openai");
-  if (process.env.GROQ_API_KEY) aiProviders.push("groq");
-  
-  checks.ai = {
-    status: aiProviders.length > 0 ? "configured" : "not_configured",
-    providers: aiProviders,
-  };
-  
-  const allOk = Object.values(checks).every((c) => c.status === "ok" || c.status === "configured");
-  
-  res.status(allOk ? 200 : 503).json({
+  if (cfg.OPENROUTER_API_KEY) aiProviders.push("openrouter");
+  if (cfg.OPENAI_API_KEY) aiProviders.push("openai");
+  if (cfg.GROQ_API_KEY) aiProviders.push("groq");
+  if (cfg.LOCAL_AI_URL) aiProviders.push(`local(${cfg.LOCAL_AI_URL})`);
+  checks.ai = { status: aiProviders.length > 0 ? "configured" : "not_configured", providers: aiProviders };
+  const allOk = Object.values(checks).every((ch) => ch.status === "ok" || ch.status === "configured");
+  return c.json({
     status: allOk ? "healthy" : "degraded",
     checks,
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-  });
-});
+  }, allOk ? 200 : 503);
+};
 
-// Model info endpoint
-router.get("/model-info", (_req: Request, res: Response) => {
-  res.json({
-    text: process.env.AI_TEXT_MODEL || "not configured",
-    vision: process.env.AI_VISION_MODEL || "not configured",
-    qbank: process.env.AI_QBANK_MODEL || "not configured",
-    explain: process.env.AI_EXPLAIN_MODEL || "not configured",
+const modelInfo = (c: any) => {
+  const cfg = getConfig(c.env);
+  return c.json({
+    text: cfg.AI_TEXT_MODEL,
+    vision: cfg.AI_VISION_MODEL,
+    qbank: cfg.AI_QBANK_MODEL,
+    explain: cfg.AI_EXPLAIN_MODEL,
     providers: {
-      openrouter: !!process.env.OPENROUTER_API_KEY,
-      openai: !!process.env.OPENAI_API_KEY,
-      groq: !!process.env.GROQ_API_KEY,
-      ollama: !!process.env.OLLAMA_CLOUD_API_KEY,
+      openrouter: !!cfg.OPENROUTER_API_KEY,
+      openai: !!cfg.OPENAI_API_KEY,
+      groq: !!cfg.GROQ_API_KEY,
+      ollama: !!cfg.OLLAMA_CLOUD_API_KEY,
+      local: !!cfg.LOCAL_AI_URL,
     },
   });
-});
+};
 
-export default router;
+// The frontend uses API_BASE_URL = "/api", so the same handlers are exposed both
+// at the root and under /api.
+healthRoutes.get("/healthz", healthz);
+healthRoutes.get("/health", health);
+healthRoutes.get("/model-info", modelInfo);
+healthRoutes.get("/api/healthz", healthz);
+healthRoutes.get("/api/health", health);
+healthRoutes.get("/api/model-info", modelInfo);
