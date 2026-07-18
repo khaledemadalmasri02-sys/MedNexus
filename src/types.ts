@@ -16,6 +16,7 @@ export interface Bindings {
   AI_QBANK_MODEL?: string;
   AI_EXPLAIN_MODEL?: string;
   STUDY_BUDDY_MODEL?: string;
+  LOCAL_AI_TIMEOUT_MS?: string;
   FREE_MAX_DECKS?: string;
   FREE_MAX_CARDS_PER_DECK?: string;
   ADMIN_SECRET_KEY?: string;

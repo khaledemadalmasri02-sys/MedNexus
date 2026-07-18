@@ -1,4 +1,4 @@
-CREATE TABLE `library_cards` (
+CREATE TABLE IF NOT EXISTS `library_cards` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`library_deck_id` integer NOT NULL,
 	`front` text NOT NULL,
@@ -14,7 +14,7 @@ CREATE TABLE `library_cards` (
 	FOREIGN KEY (`library_deck_id`) REFERENCES `library_decks`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
-CREATE TABLE `library_decks` (
+CREATE TABLE IF NOT EXISTS `library_decks` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`name` text NOT NULL,
 	`description` text,

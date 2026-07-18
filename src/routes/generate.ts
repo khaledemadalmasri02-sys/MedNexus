@@ -3,8 +3,9 @@ import type { AppEnv } from "../types";
 import { decks, cards, generationLogs } from "../db/index";
 import { getConfig } from "../lib/config";
 import { getDb, getUserId, readJson, insertBatched } from "../lib/helpers";
-import { createAIService, PartialGenerationError } from "../lib/ai";
+import { createAIService } from "../lib/ai";
 import { validate, generateSchema } from "../middleware/validate";
+import { logger } from "../lib/logger";
 
 export const generateRoutes = new Hono<AppEnv>();
 
@@ -228,6 +229,7 @@ function isAuthError(error: Error): boolean {
     message.includes("too many requests") ||
     message.includes("temporarily unavailable") ||
     message.includes("ai request failed") ||
+    message.includes("ai api error") ||
     message.includes("fetch failed") ||
     message.includes("econnrefused") ||
     message.includes("enotfound")
@@ -264,13 +266,14 @@ function isParseError(error: Error): boolean {
   return /invalid response format|no json|parse/i.test(error.message);
 }
 
-function genOptionsFromEnv(c: any): { concurrency?: number; deadlineMs?: number } {
+function genOptionsFromEnv(c: any): { concurrency?: number } {
   const env = c.env as Record<string, string>;
   const concurrency = Number(env.GEN_CONCURRENCY);
-  const deadlineMs = Number(env.GEN_DEADLINE_MS);
   return {
-    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 5,
-    deadlineMs: Number.isFinite(deadlineMs) && deadlineMs > 0 ? deadlineMs : 240_000,
+    // Chunks generated in parallel (from GEN_CONCURRENCY). Default 1 if unset;
+    // the Worker env sets 4 so 4 chunks run concurrently. No overall deadline:
+    // generation runs until complete.
+    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 1,
   };
 }
 
@@ -279,7 +282,7 @@ function tryGenerate(
   deckType: string,
   text: string,
   cardCount: number,
-  options: { concurrency?: number; deadlineMs?: number }
+  options: { concurrency?: number }
 ): Promise<(GeneratedCardLocal | GeneratedQuestionLocal)[]> {
   return deckType === "qbank"
     ? (ai.generateQuestions(text, cardCount, options) as Promise<(GeneratedCardLocal | GeneratedQuestionLocal)[]>)
@@ -398,20 +401,17 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
     let generatedItems: (GeneratedCardLocal | GeneratedQuestionLocal)[] = [];
     const deckKind: "deck" | "qbank" = deckType === "qbank" ? "qbank" : "deck";
     let usedOfflineFallback = false;
-    let partialGeneration = false;
 
     try {
       generatedItems = await tryGenerate(ai, deckType, text, cardCount, genOptions);
     } catch (aiErr) {
-      if (aiErr instanceof PartialGenerationError) {
-        generatedItems = aiErr.items;
-        partialGeneration = true;
-      } else if (isAuthError(aiErr as Error) || isParseError(aiErr as Error)) {
-        usedOfflineFallback = true;
-        generatedItems = offlineGenerate(deckType, text, cardCount);
-      } else {
-        throw aiErr;
-      }
+      // Any AI call failure (auth, network, parse, timeout, "Network
+      // connection lost", local server unreachable, etc.) falls back to the
+      // offline heuristic generator so the Generate page always produces a
+      // deck instead of a hard "Generation failed".
+      logger.warn({ err: (aiErr as Error)?.message, deckType }, "AI generation failed, using offline fallback");
+      usedOfflineFallback = true;
+      generatedItems = offlineGenerate(deckType, text, cardCount);
     }
     const ensured = ensureNonEmpty(generatedItems, deckType, text, cardCount);
     generatedItems = ensured.items;
@@ -467,13 +467,11 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
       generationId: deck.id,
       duration,
       usedOfflineFallback,
-      partial: partialGeneration,
+      partial: false,
       requestedCount,
       generatedCount: createdCards.length,
-      message: partialGeneration
-        ? `Generation timed out but ${createdCards.length} of ${requestedCount} requested cards were saved. Re-run to generate the rest.`
-        : "Cards generated successfully. Use /explanations/generate/:deckId to generate study mode explanations.",
-    }, partialGeneration ? 200 : 201);
+      message: "Cards generated successfully. Use /explanations/generate/:deckId to generate study mode explanations.",
+    }, 201);
   } catch (err) {
     const duration = Date.now() - startTime;
     await logGeneration(c, userId, deckType, model, false, (err as Error).message, duration);
@@ -514,11 +512,21 @@ generateRoutes.post("/generate/stream", async (c) => {
 
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
       const send = (event: string, data: unknown) =>
         controller.enqueue(encoder.encode(sseEvent(event, data)));
+      // Close only after the final chunk has been enqueued and given a tick to
+      // flush. Calling controller.close() synchronously right after the last
+      // enqueue can truncate the buffered `complete`/`error` payload before it
+      // reaches the client (curl drains the whole stream so it hides the bug,
+      // but the browser's incremental reader intermittently misses it).
+      const closeWhenReady = () => {
+        if (closed) return;
+        closed = true;
+        setTimeout(() => { try { controller.close(); } catch { /* already closed */ } }, 100);
+      };
       const startTime = Date.now();
       let usedOfflineFallback = false;
-      let partialGeneration = false;
 
       try {
         send("status", { message: "Starting generation..." });
@@ -527,17 +535,12 @@ generateRoutes.post("/generate/stream", async (c) => {
         try {
           generatedItems = await tryGenerate(ai, deckType, text, cardCount, genOptions);
         } catch (aiErr) {
-          if (aiErr instanceof PartialGenerationError) {
-            generatedItems = aiErr.items;
-            partialGeneration = true;
-            send("status", { message: `Generation timed out; saving ${generatedItems.length} cards produced so far...` });
-          } else if (isAuthError(aiErr as Error) || isParseError(aiErr as Error)) {
-            usedOfflineFallback = true;
-            send("status", { message: "AI service unavailable, using offline generator..." });
-            generatedItems = offlineGenerate(deckType, text, cardCount);
-          } else {
-            throw aiErr;
-          }
+          // Any AI failure falls back to the offline generator so the stream
+          // always emits a `complete` (never an uncaught hang / "Generation failed").
+          logger.warn({ err: (aiErr as Error)?.message, deckType }, "AI generation failed, using offline fallback");
+          usedOfflineFallback = true;
+          send("status", { message: "AI service unavailable, using offline generator..." });
+          generatedItems = offlineGenerate(deckType, text, cardCount);
         }
         const ensured = ensureNonEmpty(generatedItems, deckType, text, cardCount);
         generatedItems = ensured.items;
@@ -602,15 +605,15 @@ generateRoutes.post("/generate/stream", async (c) => {
           generationId: deck.id,
           duration,
           usedOfflineFallback,
-          partial: partialGeneration,
+          partial: false,
           requestedCount,
           generatedCount: createdCards.length,
-          message: partialGeneration
-            ? `Generation timed out but ${createdCards.length} of ${requestedCount} requested cards were saved. Re-run to generate the rest.`
-            : "Cards generated. Use /explanations/generate/:deckId for study explanations.",
+          message: "Cards generated. Use /explanations/generate/:deckId for study explanations.",
         });
+        closeWhenReady();
       } catch (err) {
         const duration = Date.now() - startTime;
+        logger.error({ err, deckType }, "Stream generation failed");
         await logGeneration(c, userId, deckType, model, false, (err as Error).message, duration);
         const isAuth = isAuthError(err as Error);
         send("error", {
@@ -618,9 +621,9 @@ generateRoutes.post("/generate/stream", async (c) => {
             ? "AI service authentication failed. Using offline mode."
             : "Generation failed. Please try again.",
           code: isAuth ? "AUTH_ERROR" : "GENERATION_ERROR",
+          detail: (err as Error)?.message ?? String(err),
         });
-      } finally {
-        controller.close();
+        closeWhenReady();
       }
     },
   });

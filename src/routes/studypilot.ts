@@ -7,7 +7,7 @@ import { studypilotPlans, decks, cards, cardProgress, generationLogs, libraryDec
 import { validate } from "../middleware/validate";
 import { logger } from "../lib/logger";
 import { sm2Update } from "../lib/sm2";
-import { createAIService, PartialGenerationError, type GeneratedCard } from "../lib/ai";
+import { createAIService, type GeneratedCard } from "../lib/ai";
 import { getConfig } from "../lib/config";
 import {
   ingestText,
@@ -64,13 +64,11 @@ function isParseError(error: Error): boolean {
   return /invalid response format|no json|parse/i.test(error.message);
 }
 
-function genOptionsFromEnv(c: any): { concurrency?: number; deadlineMs?: number } {
+function genOptionsFromEnv(c: any): { concurrency?: number } {
   const env = c.env as Record<string, string>;
   const concurrency = Number(env.GEN_CONCURRENCY);
-  const deadlineMs = Number(env.GEN_DEADLINE_MS);
   return {
     concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 5,
-    deadlineMs: Number.isFinite(deadlineMs) && deadlineMs > 0 ? deadlineMs : 240_000,
   };
 }
 
@@ -114,7 +112,6 @@ const ingestSchema = z.object({
 
 studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) => {
   let usedAi = false;
-  let partial = false;
   try {
     const { source, text, title } = c.get("validated") as any;
     const userId = getUserId(c);
@@ -136,11 +133,7 @@ studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) =>
       items = await ai.generateCards(cleaned, Math.max(5, Math.ceil(words / 40)), genOptions);
       usedAi = true;
     } catch (e) {
-      if (e instanceof PartialGenerationError) {
-        items = e.items as GeneratedCard[];
-        partial = true;
-        usedAi = true;
-      } else if (isAiDownError(e)) {
+      if (isAiDownError(e)) {
         usedAi = false;
       } else {
         throw e;
@@ -221,7 +214,7 @@ studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) =>
       moduleCount: clusters.length,
       cardCount,
       usedAi,
-      partial,
+      partial: false,
       modules: clusters.map((cl) => ({
         name: cl.name,
         difficulty: cl.difficulty,

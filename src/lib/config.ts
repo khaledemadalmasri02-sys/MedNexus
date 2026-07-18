@@ -16,6 +16,9 @@ export type AppConfig = {
   AI_QBANK_MODEL: string;
   AI_EXPLAIN_MODEL: string;
   STUDY_BUDDY_MODEL?: string;
+  // Max wall-clock ms for a single local/self-hosted AI request. 0 = no timeout
+  // (let the model run as long as it needs). Defaults to 0.
+  LOCAL_AI_TIMEOUT_MS: number;
   FREE_MAX_DECKS: number;
   FREE_MAX_CARDS_PER_DECK: number;
 };
@@ -31,12 +34,13 @@ export function getConfig(env: Bindings): AppConfig {
     OLLAMA_CLOUD_API_KEY: env.OLLAMA_CLOUD_API_KEY,
     MISTRAL_API_KEY: env.MISTRAL_API_KEY,
     GOOGLE_AI_API_KEY: env.GOOGLE_AI_API_KEY,
-    LOCAL_AI_URL: env.LOCAL_AI_URL || "http://192.168.100.99:1234/v1",
+    LOCAL_AI_URL: env.LOCAL_AI_URL || "http://localhost:1234/v1",
     AI_TEXT_MODEL: env.AI_TEXT_MODEL || "not configured",
     AI_VISION_MODEL: env.AI_VISION_MODEL || "not configured",
     AI_QBANK_MODEL: env.AI_QBANK_MODEL || "not configured",
     AI_EXPLAIN_MODEL: env.AI_EXPLAIN_MODEL || "not configured",
     STUDY_BUDDY_MODEL: env.STUDY_BUDDY_MODEL,
+    LOCAL_AI_TIMEOUT_MS: Number(env.LOCAL_AI_TIMEOUT_MS) || 0,
     FREE_MAX_DECKS: Number(env.FREE_MAX_DECKS || 10),
     FREE_MAX_CARDS_PER_DECK: Number(env.FREE_MAX_CARDS_PER_DECK || 100),
   };

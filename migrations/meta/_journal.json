@@ -29,6 +29,16 @@
     {
       "idx": 3,
       "version": "6",
+      "when": 1784320000000,
+      "tag": "0003_library_cards",
+      "folderMillis": 1784320000000,
+      "filename": "0003_library_cards.sql",
+      "hash": "e860ce69f7ed9c70d47ab704c8071c61e9c0f1890bf2fa9e19c72d712e4bae1a",
+      "breakpoints": false
+    },
+    {
+      "idx": 4,
+      "version": "6",
       "when": 1784320980000,
       "tag": "0004_library_decks",
       "folderMillis": 1784320980000,

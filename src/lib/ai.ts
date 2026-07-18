@@ -13,10 +13,7 @@ export interface GenerateOptions {
   maxTokens?: number;
   // Max chunks generated in parallel. Bounds load on the AI provider.
   concurrency?: number;
-  // Overall wall-clock budget (ms). When exceeded, in-flight calls abort and
-  // a PartialGenerationError is thrown carrying whatever was produced so far.
-  deadlineMs?: number;
-  // External abort signal (e.g. a per-request deadline).
+  // External abort signal (e.g. client disconnect). Cancels in-flight calls.
   signal?: AbortSignal;
 }
 
@@ -67,7 +64,7 @@ function getApiBaseUrl(model: string, config: AppConfig): string {
     case "local":
     case "lmstudio":
     case "ollama": {
-      const base = (config.LOCAL_AI_URL || "http://192.168.100.99:1234/v1").replace(/\/+$/, "");
+      const base = (config.LOCAL_AI_URL || "http://192.168.100.205:1234/v1").replace(/\/+$/, "");
       return base.startsWith("http") ? base : `http://${base}`;
     }
     case "openrouter":
@@ -91,7 +88,10 @@ function getFullModelName(model: string): string {
 
 const MAX_RETRIES = 3;
 const BASE_RETRY_DELAY_MS = 1000;
-const AI_TIMEOUT_MS = 60_000;
+// Self-hosted models (LM Studio over a tunnel) can be slow. The per-request
+// local timeout is now configurable via LOCAL_AI_TIMEOUT_MS (default 0 = no
+// timeout) so a slow-but-working model isn't cut off. The overall generation
+// budget is still bounded separately by GEN_DEADLINE_MS.
 
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
@@ -106,14 +106,16 @@ function isLocalProviderDown(status: number | null, err: unknown, provider: stri
   if (!isLocalProvider(provider)) return false;
   if (status !== null && (status === 502 || status === 503 || status === 504)) return true;
   const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
-  return /fetch failed|econnrefused|bad gateway|502|503|504|enotfound|network/i.test(msg);
+  return /fetch failed|econnrefused|bad gateway|502|503|504|enotfound|network|aborted|timed out|timeout/i.test(msg);
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // Run `worker` over `items` with a bounded number of concurrent executions.
-// Remaining work is skipped once `externalAbort` fires. A single non-abort
-// error rejects the whole pool; abort errors are swallowed (item skipped).
+// Remaining work is skipped once `externalAbort` fires. A per-item error does
+// NOT abort the whole pool: the failing item is recorded as undefined and the
+// other items continue, so one stalling/failing chunk can't kill an entire
+// generation batch. Abort errors are also swallowed (item skipped).
 async function runPool<T, R>(
   items: T[],
   worker: (item: T, index: number) => Promise<R>,
@@ -129,29 +131,18 @@ async function runPool<T, R>(
       try {
         results[i] = await worker(items[i], i);
       } catch (err) {
-        if ((err as any)?.name === "AbortError") {
-          results[i] = undefined;
-          continue;
-        }
-        throw err;
+        // One chunk failing (local model stall, timeout, parse error, network)
+        // must not abort the rest of the batch. Leave it undefined and move on;
+        // the caller still returns whatever the other chunks produced.
+        logger.warn({ err: (err as Error)?.message, index: i }, "runPool item failed, continuing batch");
+        results[i] = undefined;
+        continue;
       }
     }
   };
   const pool = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, () => exec());
   await Promise.all(pool);
   return results.filter((r): r is R => r !== undefined);
-}
-
-// Thrown when the overall deadline is exceeded but some items were already
-// produced. Carries those items so the caller can persist a partial result
-// instead of discarding all work.
-export class PartialGenerationError extends Error {
-  items: any[];
-  constructor(items: any[], message = "Generation timed out before all items were produced") {
-    super(message);
-    this.name = "PartialGenerationError";
-    this.items = items;
-  }
 }
 
 // ── Robust JSON-array extraction for AI outputs ──
@@ -244,6 +235,7 @@ async function fetchWithRetry(
   init: RequestInit & { signal?: AbortSignal },
   label: string,
   provider = "openrouter",
+  localTimeoutMs = 0,
 ): Promise<Response> {
   const external = init.signal;
   const { signal: _omit, ...restInit } = init;
@@ -263,7 +255,11 @@ async function fetchWithRetry(
       onExternal = () => controller.abort();
       external.addEventListener("abort", onExternal, { once: true });
     }
-    const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+    // Bound local/self-hosted requests so a stalled model fails fast. A
+    // localTimeoutMs of 0 means no per-request timeout (let it run).
+    const localTimeout = isLocalProvider(provider) && localTimeoutMs > 0
+      ? setTimeout(() => controller.abort(), localTimeoutMs)
+      : null;
     try {
       const response = await fetch(url, { ...restInit, signal: controller.signal });
       if (response.ok || !isRetryableStatus(response.status)) return response;
@@ -274,22 +270,27 @@ async function fetchWithRetry(
       const body = await response.text().catch(() => "");
       lastError = new Error(`AI API ${response.status}: ${body}`);
       logger.warn({ label, status: response.status, attempt: attempt + 1 }, "Retryable AI error");
-    } catch (err: any) {
-      if (isLocalProviderDown(null, err, provider)) {
-        const msg = (err?.message || "AI request failed").toString();
-        throw new Error(msg.includes("AI API") ? err : new Error(`AI request failed: ${msg}`));
-      }
-      if (external?.aborted) {
-        const e = new Error("Generation aborted by deadline");
-        e.name = "AbortError";
-        lastError = e;
-        break;
-      }
-      lastError = err?.name === "AbortError" ? new Error("AI request timed out") : (err as Error);
-      logger.warn({ label, attempt: attempt + 1, err: lastError.message }, "AI request network error");
-    } finally {
-      clearTimeout(timeout);
+  } catch (err: any) {
+    if (isLocalProvider(provider)) {
+      // Local/self-hosted servers are best-effort. ANY failure here (stall,
+      // abort, empty, network) should be reported as a provider-availability
+      // error so callers fall back to offline generation instead of failing.
+      const msg = (err?.message || err?.name || "AI request failed").toString();
+      const wrapped = `AI request failed: ${msg}`;
+      logger.warn({ label, err: msg }, "Local AI request failed, will fall back");
+      throw new Error(wrapped);
+    }
+    if (external?.aborted) {
+      const e = new Error("Generation aborted by deadline");
+      e.name = "AbortError";
+      lastError = e;
+      break;
+    }
+    lastError = err?.name === "AbortError" ? new Error("AI request timed out") : (err as Error);
+    logger.warn({ label, attempt: attempt + 1, err: lastError.message }, "AI request network error");
+  } finally {
       if (external && onExternal) external.removeEventListener("abort", onExternal);
+      if (localTimeout) clearTimeout(localTimeout);
     }
   }
   throw lastError || new Error("AI request failed after retries");
@@ -350,16 +351,64 @@ export class AIService {
         messages,
         temperature: options.temperature ?? 0.7,
         max_tokens: options.maxTokens ?? 8192,
+        // Qwen3 / reasoning models put the answer in `reasoning_content` and
+        // leave `content` empty unless thinking is disabled. Disable it so the
+        // OpenAI-style completion we parse comes back in `message.content`.
+        enable_thinking: false,
       }),
     };
     if (options.signal) init.signal = options.signal;
-    const response = await fetchWithRetry(`${baseUrl}/chat/completions`, init, `complete:${model}`, provider);
+    const response = await fetchWithRetry(`${baseUrl}/chat/completions`, init, `complete:${model}`, provider, this.config.LOCAL_AI_TIMEOUT_MS);
     if (!response.ok) {
       const error = await response.text();
+      // Local/self-hosted servers (LM Studio) frequently answer with a 4xx/5xx
+      // when the model isn't loaded or the tunnel drops. Route these as
+      // provider-availability errors so callers fall back to offline generation
+      // instead of surfacing a generic "Generation failed".
+      if (isLocalProvider(provider)) {
+        logger.warn({ status: response.status, error }, "Local AI returned an error, will fall back");
+        throw new Error(`AI request failed: AI API error: ${response.status} - ${error}`);
+      }
       throw new Error(`AI API error: ${response.status} - ${error}`);
     }
-    const data = (await response.json()) as { choices: Array<{ message: { content: string } }> };
-    return data.choices[0]?.message?.content || "";
+    const data = (await response.json().catch(() => null)) as
+      | { choices?: Array<{ message?: { content?: string } }> }
+      | null;
+    const content = data?.choices?.[0]?.message?.content ?? "";
+    // Local/self-hosted servers sometimes answer 200 but stream no usable
+    // content (model not actually loaded, stalled generation). Treat empty
+    // output as a parse failure so callers fall back to offline generation
+    // instead of producing a deck with zero cards.
+    if (!content.trim()) {
+      throw new Error("Invalid response format from AI: empty completion (no JSON content)");
+    }
+    return content;
+  }
+
+  // If the primary (local/tunnel) provider fails, retry once against a hosted
+  // provider (OpenRouter) when its key is configured. This keeps generation
+  // working from the deployed Worker even when the self-hosted tunnel is down
+  // or the local model stalls. Returns the content or rethrows a fallback-safe
+  // error so the route still degrades to offline generation.
+  private async completeWithFallback(messages: Message[], options: GenerateOptions, attemptedModel: string): Promise<string> {
+    try {
+      return await this.complete(messages, options);
+    } catch (primaryErr) {
+      const { provider } = parseModel(attemptedModel);
+      if (isLocalProvider(provider) && this.config.OPENROUTER_API_KEY) {
+        logger.warn({ err: (primaryErr as Error)?.message, model: attemptedModel }, "Local AI failed, retrying via OpenRouter");
+        const fallbackModel = options.model?.includes("qbank") ? "openrouter/qwen/qwen3.5-9b"
+          : options.model?.includes("vision") ? "openrouter/qwen/qwen3-vl-8b-instruct"
+          : "openrouter/qwen/qwen3.5-9b";
+        try {
+          return await this.complete(messages, { ...options, model: fallbackModel });
+        } catch (fbErr) {
+          logger.warn({ err: (fbErr as Error)?.message }, "OpenRouter fallback also failed");
+          throw primaryErr;
+        }
+      }
+      throw primaryErr;
+    }
   }
 
   // Stream a completion as an SSE-friendly async generator of text deltas.
@@ -384,8 +433,9 @@ export class AIService {
         temperature: options.temperature ?? 0.7,
         max_tokens: options.maxTokens ?? 8192,
         stream: true,
+        enable_thinking: false,
       }),
-    }, `stream:${model}`, provider);
+    }, `stream:${model}`, provider, this.config.LOCAL_AI_TIMEOUT_MS);
     if (!response.ok) {
       const error = await response.text();
       throw new Error(`AI API error: ${response.status} - ${error}`);
@@ -446,6 +496,8 @@ export class AIService {
     if (chunks.length === 0) return [];
     const concurrency = Math.max(1, Math.min(options.concurrency ?? 5, 10));
     const perChunk = Math.max(1, Math.ceil(cardCount / chunks.length));
+    // No overall deadline: generation runs until the model finishes every
+    // chunk. Only an external abort signal (e.g. client disconnect) cancels.
     const ac = new AbortController();
     let onExt: (() => void) | undefined;
     if (options.signal) {
@@ -453,32 +505,16 @@ export class AIService {
       onExt = () => ac.abort();
       options.signal.addEventListener("abort", onExt, { once: true });
     }
-    const timer = options.deadlineMs && options.deadlineMs > 0
-      ? setTimeout(() => ac.abort(), options.deadlineMs)
-      : null;
     const flatten = (arrs: GeneratedCard[][]) => arrs.reduce<GeneratedCard[]>((a, x) => a.concat(x || []), []);
-    let collected: GeneratedCard[][] = [];
+    logger.info({ chunks: chunks.length, concurrency, perChunk }, "generateCards: starting parallel chunk pool");
     try {
-      collected = await runPool(chunks, async (chunk) => {
+      return flatten(await runPool(chunks, async (chunk) => {
         if (ac.signal.aborted) return [];
         return await this.generateCardsChunk(chunk, perChunk, { ...options, signal: ac.signal }, model);
-      }, concurrency, ac.signal);
-    } catch (e) {
-      if (timer) clearTimeout(timer);
+      }, concurrency, ac.signal));
+    } finally {
       if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
-      if (ac.signal.aborted) {
-        const items = flatten(collected);
-        if (items.length > 0) throw new PartialGenerationError(items);
-      }
-      throw e;
     }
-    if (timer) clearTimeout(timer);
-    if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
-    if (ac.signal.aborted) {
-      const items = flatten(collected);
-      if (items.length > 0) throw new PartialGenerationError(items);
-    }
-    return flatten(collected);
   }
 
   private async generateCardsChunk(chunk: string, count: number, options: GenerateOptions, model: string): Promise<GeneratedCard[]> {
@@ -489,10 +525,10 @@ Rules:
 - Back: a concise, accurate answer
 - Include relevant tags
 Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
-    const response = await this.complete([
+    const response = await this.completeWithFallback([
       { role: "system", content: systemPrompt },
       { role: "user", content: `Generate ${count} flashcards from this text:\n\n${chunk}` },
-    ], { ...options, model, temperature: 0.5 });
+    ], { ...options, model, temperature: 0.5, maxTokens: 2000 }, model);
     return parseJsonArray<GeneratedCard>(response);
   }
 
@@ -509,32 +545,15 @@ Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
       onExt = () => ac.abort();
       options.signal.addEventListener("abort", onExt, { once: true });
     }
-    const timer = options.deadlineMs && options.deadlineMs > 0
-      ? setTimeout(() => ac.abort(), options.deadlineMs)
-      : null;
     const flatten = (arrs: GeneratedQuestion[][]) => arrs.reduce<GeneratedQuestion[]>((a, x) => a.concat(x || []), []);
-    let collected: GeneratedQuestion[][] = [];
     try {
-      collected = await runPool(chunks, async (chunk) => {
+      return flatten(await runPool(chunks, async (chunk) => {
         if (ac.signal.aborted) return [];
         return await this.generateQuestionsChunk(chunk, perChunk, { ...options, signal: ac.signal }, model);
-      }, concurrency, ac.signal);
-    } catch (e) {
-      if (timer) clearTimeout(timer);
+      }, concurrency, ac.signal));
+    } finally {
       if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
-      if (ac.signal.aborted) {
-        const items = flatten(collected);
-        if (items.length > 0) throw new PartialGenerationError(items);
-      }
-      throw e;
     }
-    if (timer) clearTimeout(timer);
-    if (onExt && options.signal) options.signal.removeEventListener("abort", onExt);
-    if (ac.signal.aborted) {
-      const items = flatten(collected);
-      if (items.length > 0) throw new PartialGenerationError(items);
-    }
-    return flatten(collected);
   }
 
   private async generateQuestionsChunk(chunk: string, count: number, options: GenerateOptions, model: string): Promise<GeneratedQuestion[]> {
@@ -545,10 +564,10 @@ Rules:
 - Mark the correct answer with correctIndex (0-based)
 - Include a detailed explanation
 Return ONLY a valid JSON array: [{"front":"...","back":"...","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
-    const response = await this.complete([
+    const response = await this.completeWithFallback([
       { role: "system", content: systemPrompt },
       { role: "user", content: `Generate ${count} multiple-choice questions from this text:\n\n${chunk}` },
-    ], { ...options, model, temperature: 0.5 });
+    ], { ...options, model, temperature: 0.5, maxTokens: 2500 }, model);
     return parseJsonArray<GeneratedQuestion>(response).map((q) => ({
       front: q.front,
       back: q.back,

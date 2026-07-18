@@ -106,6 +106,26 @@ export default function Library() {
     ? filteredQbanks.filter(q => q.parentId === selectedFolderId)
     : filteredQbanks;
 
+  const folderIds = new Set<number>([
+    ...decks.filter(d => decks.some(c => c.parentId === d.id)).map(d => d.id),
+    ...qbanks.filter(q => qbanks.some(c => c.parentId === q.id)).map(q => q.id),
+  ]);
+
+  const buildFolderPath = (items: Array<{ id: number; name: string; parentId?: number | null }>, folderId: number | null): Array<{ id: number; name: string }> => {
+    if (folderId === null) return [];
+    const byId = new Map(items.map(i => [i.id, i]));
+    const path: Array<{ id: number; name: string }> = [];
+    let current = byId.get(folderId);
+    let guard = 0;
+    while (current && guard++ < 20) {
+      path.unshift({ id: current.id, name: current.name });
+      current = current.parentId != null ? byId.get(current.parentId) : undefined;
+    }
+    return path;
+  };
+  const deckFolderPath = buildFolderPath(decks, selectedFolderId);
+  const qbankFolderPath = buildFolderPath(qbanks, selectedFolderId);
+
   const handleBulkMerge = async () => {
     if (selectedDecks.size < 2 || !bulkMergeName.trim()) return;
     try {
@@ -397,11 +417,19 @@ export default function Library() {
               <motion.div
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="flex items-center gap-1.5 mb-4 text-xs text-text-muted"
+                className="flex items-center gap-1.5 mb-4 text-xs text-text-muted flex-wrap"
               >
                 <button onClick={() => setSelectedFolderId(null)} className="hover:text-text-primary transition-colors">All Decks</button>
-                <ChevronRight className="h-3 w-3" />
-                <span className="text-text-secondary">{decks.find(d => d.id === selectedFolderId)?.name || "Folder"}</span>
+                {deckFolderPath.map(crumb => (
+                  <span key={crumb.id} className="flex items-center gap-1.5">
+                    <ChevronRight className="h-3 w-3" />
+                    {crumb.id === selectedFolderId ? (
+                      <span className="text-text-secondary">{crumb.name}</span>
+                    ) : (
+                      <button onClick={() => setSelectedFolderId(crumb.id)} className="hover:text-text-primary transition-colors">{crumb.name}</button>
+                    )}
+                  </span>
+                ))}
               </motion.div>
             )}
 
@@ -432,7 +460,7 @@ export default function Library() {
             </AnimatePresence>
 
             <DeckList
-              decks={folderFilteredDecks}
+              decks={folderFilteredDecks.filter(d => !folderIds.has(d.id))}
               generatingDecks={generatingDecks}
               explanationProgress={explanationProgress}
               explanationStats={explanationStats}
@@ -481,14 +509,22 @@ export default function Library() {
 
           <div className="flex-1 min-w-0">
             {selectedFolderId !== null && (
-              <div className="flex items-center gap-1.5 mb-4 text-xs text-text-muted">
+              <div className="flex items-center gap-1.5 mb-4 text-xs text-text-muted flex-wrap">
                 <button onClick={() => setSelectedFolderId(null)} className="hover:text-text-primary transition-colors">All QBanks</button>
-                <ChevronRight className="h-3 w-3" />
-                <span className="text-text-secondary">{qbanks.find(q => q.id === selectedFolderId)?.name || "Folder"}</span>
+                {qbankFolderPath.map(crumb => (
+                  <span key={crumb.id} className="flex items-center gap-1.5">
+                    <ChevronRight className="h-3 w-3" />
+                    {crumb.id === selectedFolderId ? (
+                      <span className="text-text-secondary">{crumb.name}</span>
+                    ) : (
+                      <button onClick={() => setSelectedFolderId(crumb.id)} className="hover:text-text-primary transition-colors">{crumb.name}</button>
+                    )}
+                  </span>
+                ))}
               </div>
             )}
             <QBankList
-              qbanks={folderFilteredQbanks}
+              qbanks={folderFilteredQbanks.filter(q => !folderIds.has(q.id))}
               onDelete={deleteQBank}
               glassStyle={glassStyle}
             />

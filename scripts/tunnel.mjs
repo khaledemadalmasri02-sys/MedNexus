@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -7,10 +7,23 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
 const wranglerPath = resolve(root, "wrangler.toml");
+const tunnelStatePath = resolve(root, ".tunnel-state.json");
 
-// Local server that should be exposed (LM Studio OpenAI-compatible /v1 API).
-const LOCAL_TARGET = process.env.TUNNEL_TARGET || "http://localhost:1234";
+// ── Local server that should be exposed (LM Studio OpenAI-compatible /v1 API) ──
+// Prefer the target stored in .tunnel-state.json, then TUNNEL_TARGET env,
+// then the known LM Studio host, and finally localhost.
+const tunnelState = safeReadJson(tunnelStatePath);
+const LM_STUDIO_HOST = "http://192.168.100.205:1234";
+const LOCAL_TARGET =
+  process.env.TUNNEL_TARGET ||
+  tunnelState?.target ||
+  LM_STUDIO_HOST;
+
+// Deploy the worker after the tunnel is up (unless --no-deploy / SKIP_DEPLOY).
 const AUTO_DEPLOY = !process.env.SKIP_DEPLOY && !process.argv.includes("--no-deploy");
+// Apply D1 migrations to the remote DB before deploy (safe to run repeatedly;
+// wrangler skips already-applied migrations). Set SKIP_MIGRATE=1 to skip.
+const AUTO_MIGRATE = !process.env.SKIP_MIGRATE && !process.argv.includes("--no-migrate");
 
 // Load a local .env (gitignored) if present — only used for `wrangler deploy` creds.
 loadDotenv();
@@ -29,6 +42,14 @@ function loadDotenv() {
     }
   } catch {
     /* no .env */
+  }
+}
+
+function safeReadJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
   }
 }
 
@@ -59,12 +80,35 @@ function installCloudflared() {
   return dest;
 }
 
+// Update wrangler.toml's LOCAL_AI_URL. Tolerant of the key being absent
+// (appends a [vars] entry) or present (replaces in place).
 function updateWrangler(tunnelUrl) {
   const newUrl = `${tunnelUrl}/v1`;
-  const content = readFileSync(wranglerPath, "utf8");
-  const updated = content.replace(/LOCAL_AI_URL\s*=\s*"[^"]*"/, `LOCAL_AI_URL = "${newUrl}"`);
-  writeFileSync(wranglerPath, updated);
+  let content = readFileSync(wranglerPath, "utf8");
+  const re = /^LOCAL_AI_URL\s*=\s*"[^"]*"/m;
+  if (re.test(content)) {
+    content = content.replace(re, `LOCAL_AI_URL = "${newUrl}"`);
+  } else if (/\[vars\]/.test(content)) {
+    content = content.replace(/\[vars\]/, `[vars]\nLOCAL_AI_URL = "${newUrl}"`);
+  } else {
+    content += `\n[vars]\nLOCAL_AI_URL = "${newUrl}"\n`;
+  }
+  writeFileSync(wranglerPath, content);
   return newUrl;
+}
+
+function persistTunnelState(tunnelUrl) {
+  const state = {
+    ...(tunnelState || {}),
+    subdomain: tunnelUrl,
+    target: LOCAL_TARGET,
+    lastUpdated: new Date().toISOString(),
+  };
+  try {
+    writeFileSync(tunnelStatePath, JSON.stringify(state, null, 2) + "\n");
+  } catch {
+    /* non-fatal */
+  }
 }
 
 // For the deploy step, strip the scoped tunnel token (no Worker perms) so wrangler
@@ -77,12 +121,24 @@ function wranglerEnv() {
 }
 
 function wranglerAuthenticated() {
-  try {
-    spawnSync("npx", ["wrangler", "whoami"], { stdio: ["ignore", "pipe", "pipe"], cwd: root, env: wranglerEnv() });
-    return true;
-  } catch {
+  const r = spawnSync("npx", ["wrangler", "whoami"], { stdio: ["ignore", "pipe", "pipe"], cwd: root, env: wranglerEnv() });
+  return r.status === 0;
+}
+
+function applyMigrations() {
+  log("🗄  Applying D1 migrations to remote database (idempotent)...");
+  // Newer wrangler rejects an explicit --yes; it auto-skips the confirmation
+  // prompt in non-interactive contexts (which this spawned process is).
+  const r = spawnSync(
+    "npx",
+    ["wrangler", "d1", "migrations", "apply", "mednexus-db", "--remote"],
+    { stdio: "inherit", cwd: root, env: wranglerEnv() }
+  );
+  if (r.status !== 0) {
+    log("⚠ Migrations failed or were skipped. The worker may not have its schema yet.");
     return false;
   }
+  return true;
 }
 
 function deploy() {
@@ -103,7 +159,8 @@ try {
   /* none */
 }
 
-log(`▶ Starting quick tunnel -> ${LOCAL_TARGET} (url printed below, auto-configured)`);
+log(`▶ Starting quick tunnel -> ${LOCAL_TARGET}`);
+log(`  (LM Studio must be running and serving its OpenAI-compatible /v1 API there)`);
 const child = spawn(
   cloudflared,
   ["tunnel", "--url", LOCAL_TARGET, "--loglevel", "info"],
@@ -135,8 +192,15 @@ function onTunnelUp(url) {
   if (handled) return;
   handled = true;
   const newUrl = updateWrangler(url);
+  persistTunnelState(url);
   log(`\n✅ Tunnel live:   ${url}`);
   log(`✅ wrangler.toml: LOCAL_AI_URL = ${newUrl}`);
+
+  if (!AUTO_MIGRATE) {
+    log("   (migrations skipped — set SKIP_MIGRATE=1)");
+  } else {
+    applyMigrations();
+  }
 
   if (!AUTO_DEPLOY) {
     log("   (deploy skipped — run: npm run deploy)\n");
@@ -151,7 +215,8 @@ function onTunnelUp(url) {
 
 setTimeout(() => {
   if (!captured) {
-    log("⚠ Could not capture the tunnel url from logs. Is LM Studio reachable at " + LOCAL_TARGET + "?");
+    log(`⚠ Could not capture the tunnel url from logs. Is LM Studio reachable at ${LOCAL_TARGET}?`);
+    log("  Check: curl -s " + LOCAL_TARGET + "/v1/models");
   }
 }, 20000);
 

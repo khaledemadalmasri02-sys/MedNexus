@@ -12,12 +12,14 @@ interface FolderTreeProps {
   onMove: (itemId: number, targetFolderId: number | null) => void;
 }
 
-interface TreeNodeBase {
-  id: number;
-  name: string;
-  parentId: number | null;
-  children: TreeNodeBase[];
-  count: number;
+type TreeNode = (api.DeckTreeNode | api.QBankTreeNode) & {
+  children: TreeNode[];
+};
+
+function countDescendants(node: TreeNode): number {
+  const direct = node.children.reduce((sum, c) => sum + countDescendants(c), 0);
+  const self = "cardCount" in node ? node.cardCount : (node as api.QBankTreeNode).questionCount;
+  return self + direct;
 }
 
 function FolderTreeItem({
@@ -27,20 +29,45 @@ function FolderTreeItem({
   onSelect,
   onMove,
   type,
+  reload,
 }: {
-  node: TreeNodeBase;
+  node: TreeNode;
   depth: number;
   selectedId: number | null;
   onSelect: (id: number | null) => void;
   onMove: (itemId: number, targetFolderId: number | null) => void;
   type: "deck" | "qbank";
+  reload: () => void;
 }) {
-  const [expanded, setExpanded] = useState(depth < 1);
   const hasChildren = node.children && node.children.length > 0;
   const isSelected = selectedId === node.id;
   const isFolder = hasChildren;
   const Icon = type === "qbank" ? Stethoscope : (isFolder ? Folder : Layers);
   const IconOpen = type === "qbank" ? Stethoscope : FolderOpen;
+
+  const [expanded, setExpanded] = useState(depth < 1 || isSelected);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+
+  useEffect(() => {
+    if (isSelected) setExpanded(true);
+  }, [isSelected]);
+
+  const handleCreateSubFolder = useCallback(async () => {
+    if (!newFolderName.trim()) return;
+    try {
+      if (type === "deck") {
+        await api.decksApi.create({ name: newFolderName, description: "", parentId: node.id });
+      } else {
+        await api.qbanksApi.create({ name: newFolderName, parentId: node.id });
+      }
+      setNewFolderName("");
+      setShowNewFolder(false);
+      setExpanded(true);
+      onSelect(node.id);
+      reload();
+    } catch { /* ignore */ }
+  }, [newFolderName, node.id, type, onSelect]);
 
   return (
     <div>
@@ -79,8 +106,44 @@ function FolderTreeItem({
           <Icon className="h-4 w-4 shrink-0" style={{ color: isSelected ? "var(--accent-cyan)" : type === "qbank" ? "var(--accent-purple)" : "var(--accent-green)" }} />
         )}
         <span className="text-sm text-text-primary truncate flex-1 min-w-0">{node.name}</span>
-        <span className="text-[10px] text-text-muted shrink-0">{node.count}</span>
+        <span className="text-[10px] text-text-muted shrink-0">{countDescendants(node)}</span>
+        <button
+          title="New subfolder"
+          onClick={(e) => { e.stopPropagation(); setShowNewFolder(v => !v); setExpanded(true); }}
+          className="p-0.5 rounded hover:bg-glass-border transition-colors shrink-0 opacity-0 group-hover:opacity-100"
+        >
+          <FolderPlus className="h-3 w-3 text-text-muted" />
+        </button>
       </motion.div>
+
+      <AnimatePresence>
+        {showNewFolder && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+            style={{ marginLeft: `${(depth + 1) * 16 + 24}px`, marginRight: 8 }}
+          >
+            <div className="space-y-2 mb-2">
+              <input
+                type="text"
+                placeholder="Folder name…"
+                value={newFolderName}
+                onChange={e => setNewFolderName(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") handleCreateSubFolder(); if (e.key === "Escape") setShowNewFolder(false); }}
+                autoFocus
+                className="w-full px-3 py-1.5 rounded-lg text-xs outline-none"
+                style={{ background: "var(--glass-input-bg)", border: "1px solid var(--glass-border-light)", color: "var(--text-primary)" }}
+              />
+              <div className="flex gap-1">
+                <button onClick={handleCreateSubFolder} className="px-2 py-1 rounded text-[10px] bg-accent-green text-white font-medium">Create</button>
+                <button onClick={() => setShowNewFolder(false)} className="px-2 py-1 rounded text-[10px] text-text-secondary hover:bg-glass-border">Cancel</button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {expanded && hasChildren && (
@@ -100,6 +163,7 @@ function FolderTreeItem({
                 onSelect={onSelect}
                 onMove={onMove}
                 type={type}
+                reload={reload}
               />
             ))}
           </motion.div>
@@ -110,7 +174,7 @@ function FolderTreeItem({
 }
 
 export default function FolderTree({ type, selectedId, onSelect, onMove }: FolderTreeProps) {
-  const [tree, setTree] = useState<TreeNodeBase[]>([]);
+  const [tree, setTree] = useState<TreeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -120,10 +184,10 @@ export default function FolderTree({ type, selectedId, onSelect, onMove }: Folde
       setLoading(true);
       if (type === "deck") {
         const data = await api.decksApi.tree();
-        setTree(data.map(d => ({ ...d, children: [], count: d.cardCount })));
+        setTree(data as TreeNode[]);
       } else {
         const data = await api.qbanksApi.tree();
-        setTree(data.map(q => ({ ...q, children: [], count: q.questionCount })));
+        setTree(data as TreeNode[]);
       }
     } catch (err) {
       console.error("Failed to load tree:", err);
@@ -171,7 +235,7 @@ export default function FolderTree({ type, selectedId, onSelect, onMove }: Folde
         ) : (
           <Stethoscope className="h-4 w-4 text-accent-purple shrink-0" />
         )}
-        <span className="text-sm font-medium text-text-primary">All {type === "deck" ? "Decks" : "QBanks"}</span>
+        <span className="text-sm font-medium text-text-primary flex-1">All {type === "deck" ? "Decks" : "QBanks"}</span>
       </div>
 
       {/* Tree nodes */}
@@ -184,6 +248,7 @@ export default function FolderTree({ type, selectedId, onSelect, onMove }: Folde
           onSelect={onSelect}
           onMove={onMove}
           type={type}
+          reload={loadTree}
         />
       ))}
 
