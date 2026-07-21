@@ -18,6 +18,12 @@ migrations_dir = "migrations"
 NODE_ENV = "production"
 FREE_MAX_DECKS = "100"
 FREE_MAX_CARDS_PER_DECK = "200"
+APP_URL = "https://mednexus.fit"
+
+routes = [
+  { pattern = "mednexus.fit", zone_name = "mednexus.fit" },
+  { pattern = "api.mednexus.fit", zone_name = "mednexus.fit" }
+]
 
 # Local LM Studio server (OpenAI-compatible /v1 API) on the LAN. No API key required.
 # This host reaches LM Studio directly at 192.168.100.205:1234 (verified working).
@@ -33,7 +39,6 @@ AI_QBANK_MODEL = "local/qwen/qwen3-4b-2507"
 AI_EXPLAIN_MODEL = "local/qwen/qwen3-4b-2507"
 STUDY_BUDDY_MODEL = "local/qwen/qwen3-4b-2507"
 GOOGLE_CLIENT_ID = "911372032508-7oi1o2s1o76c3uhiajj9eiuong17ulr3.apps.googleusercontent.com"
-APP_URL = "https://mednexus-cloudflare.khaledemadalmasri02.workers.dev"
 
 # Card generation tuning (optional). Concurrency = chunks generated in parallel.
 # There is intentionally NO overall deadline: generation runs until the model
