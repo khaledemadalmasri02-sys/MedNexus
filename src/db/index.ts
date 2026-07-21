@@ -19,7 +19,7 @@ export const {
   chatMessages, agentUsage, exams, groupStudyRooms,
   supportKnowledge, supportConversations, supportMessages,
   agentKnowledge, agentResponseCache, agentCacheAnalytics,
-  articleJobs, summaries, studypilotPlans,
+  articleJobs, generationJobs, summaries, studypilotPlans,
   libraryDecks, libraryCards,
 } = schema;
 

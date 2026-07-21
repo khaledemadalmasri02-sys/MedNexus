@@ -66,3 +66,39 @@ healthRoutes.get("/model-info", modelInfo);
 healthRoutes.get("/api/healthz", healthz);
 healthRoutes.get("/api/health", health);
 healthRoutes.get("/api/model-info", modelInfo);
+
+// TEMP DEBUG: tests worker->tunnel reachability from the edge.
+const tunnelTest = async (c: any) => {
+  const cfg = getConfig(c.env);
+  const url = (cfg.LOCAL_AI_URL || "").replace(/\/+$/, "");
+  // Test both /models (GET) and /chat/completions (POST) to match the worker's exact fetch.
+  try {
+    const rModels = await fetch(`${url}/models`, { method: "GET" });
+    const modelsBody = await rModels.text();
+    // Now test a real chat completion (non-streaming) to catch model/timeout errors.
+    const rChat = await fetch(`${url}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: cfg.AI_TEXT_MODEL || "local/qwen/qwen3-4b-2507",
+        messages: [{ role: "user", content: "Say hi in 5 words" }],
+        max_tokens: 32,
+        stream: false,
+        enable_thinking: false,
+      }),
+    });
+    const chatBody = await rChat.text();
+    return c.json({
+      ok: rChat.ok,
+      modelsStatus: rModels.status,
+      chatStatus: rChat.status,
+      url,
+      modelsSnippet: modelsBody.slice(0, 100),
+      chatSnippet: chatBody.slice(0, 300),
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: String(e?.message || e), url });
+  }
+};
+healthRoutes.get("/_tunneltest", tunnelTest);
+healthRoutes.get("/api/_tunneltest", tunnelTest);

@@ -602,6 +602,26 @@ export const articleJobs = sqliteTable("article_jobs", {
 export type ArticleJob = typeof articleJobs.$inferSelect;
 export type NewArticleJob = typeof articleJobs.$inferInsert;
 
+// Generation Jobs table — for queued card/question generation
+export const generationJobs = sqliteTable("generation_jobs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").references(() => users.id),
+  type: text("type").notNull(),
+  status: text("status").notNull().default("pending"),
+  text: text("text"),
+  count: integer("count").notNull().default(10),
+  options: text("options"),
+  result: text("result"),
+  error: text("error"),
+  retryCount: integer("retry_count").notNull().default(0),
+  priority: integer("priority").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type GenerationJob = typeof generationJobs.$inferSelect;
+export type NewGenerationJob = typeof generationJobs.$inferInsert;
+
 // Summaries table — stores text/PDF uploads and their AI or auto-extracted summaries.
 export const summaries = sqliteTable("summaries", {
   id: text("id").primaryKey(),

@@ -35,6 +35,7 @@ import { terminalRoutes } from "./routes/terminal";
 import { backupRoutes } from "./routes/backup";
 import { downloadRoutes } from "./routes/download";
 import { articleJobRoutes } from "./routes/articleJobs";
+import { generationJobRoutes } from "./routes/generation-jobs";
 import { adminRoutes } from "./routes/admin";
 import { supportRoutes } from "./routes/support";
 import { agentRoutes } from "./routes/agents";
@@ -84,6 +85,7 @@ const apiRouters = [
   generationRoutes, explanationRoutes, qbankRoutes, importExportRoutes, errorRoutes,
   generateRoutes, explainRoutes, aiAnalysisRoutes, extractRoutes, offlineRoutes,
   summaryRoutes, uploadRoutes, terminalRoutes, backupRoutes, downloadRoutes, articleJobRoutes,
+  generationJobRoutes,
   adminRoutes, supportRoutes, agentRoutes, studypilotRoutes,
 ];
 for (const r of apiRouters) app.route("/api", r);
