@@ -168,6 +168,18 @@ function deploy() {
   }
 }
 
+function configureRoutes() {
+  const routes = ["mednexus.fit", "api.mednexus.fit"];
+  for (const pattern of routes) {
+    log(`🔗 Configuring route: ${pattern}/*`);
+    spawnSync("npx", ["wrangler", "route", "add", `${pattern}/*`, "--zone-name", "mednexus.fit"], {
+      stdio: "inherit",
+      cwd: root,
+      env: wranglerEnv()
+    });
+  }
+}
+
 // ── NAMED TUNNEL PATH (stable URL, survives restarts) ──
 // Runs the pre-created named tunnel `mednexus` using its token. The public
 // hostname is fixed: https://<tunnelId>.cfargotunnel.com — no expiry.
@@ -236,7 +248,9 @@ function onTunnelUp(url, isNamed) {
     return;
   }
   if (wranglerAuthenticated()) {
+    applyMigrations();
     deploy();
+    configureRoutes();
   } else {
     log("\nℹ Worker not authenticated. After `npx wrangler login`, re-run: npm run tunnel\n");
   }
