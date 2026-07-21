@@ -168,18 +168,6 @@ function deploy() {
   }
 }
 
-function configureRoutes() {
-  const routes = ["mednexus.fit", "api.mednexus.fit"];
-  for (const pattern of routes) {
-    log(`🔗 Configuring route: ${pattern}/*`);
-    spawnSync("npx", ["wrangler", "route", "add", `${pattern}/*`, "--zone-name", "mednexus.fit"], {
-      stdio: "inherit",
-      cwd: root,
-      env: wranglerEnv()
-    });
-  }
-}
-
 // ── NAMED TUNNEL PATH (stable URL, survives restarts) ──
 // Runs the pre-created named tunnel `mednexus` using its token. The public
 // hostname is fixed: https://<tunnelId>.cfargotunnel.com — no expiry.
@@ -228,14 +216,17 @@ function startQuickTunnel(cloudflared) {
 function onTunnelUp(url, isNamed) {
   const newUrl = updateWrangler(url);
   persistTunnelState(url, isNamed ? { tunnelId: TUNNEL_ID, name: TUNNEL_NAME, token: TUNNEL_TOKEN } : {});
-  log(`\n✅ Tunnel live:   ${url}`);
+  log(`✅ Tunnel live:   ${url}`);
   log(`✅ wrangler.toml: LOCAL_AI_URL = ${newUrl}`);
+  log(`✅ Worker deployed to: https://mednexus.fit`);
+  log(`   Route: https://api.mednexus.fit`);
   if (isNamed) {
     log(`ℹ This is a NAMED tunnel — the URL is STABLE and survives restarts.`);
     log(`  Leave this process running (or run \`npm run tunnel\` again later) to keep it up.`);
   } else {
     log(`⚠ This is a QUICK tunnel — the URL expires when this process stops.`);
   }
+  log(`ℹ Note: Routes mednexus.fit and api.mednexus.fit must be configured in Cloudflare Dashboard → Workers → Routes`);
 
   if (!AUTO_MIGRATE) {
     log("   (migrations skipped — set SKIP_MIGRATE=1)");
@@ -250,7 +241,6 @@ function onTunnelUp(url, isNamed) {
   if (wranglerAuthenticated()) {
     applyMigrations();
     deploy();
-    configureRoutes();
   } else {
     log("\nℹ Worker not authenticated. After `npx wrangler login`, re-run: npm run tunnel\n");
   }
