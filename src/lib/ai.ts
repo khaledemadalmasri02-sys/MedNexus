@@ -539,7 +539,7 @@ Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
     const response = await this.completeWithFallback([
       { role: "system", content: systemPrompt },
       { role: "user", content: `Generate ${count} flashcards from this text:\n\n${chunk}` },
-    ], { ...options, model, temperature: 0.5, maxTokens: 2000 }, model);
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 }, model);
     return parseJsonArray<GeneratedCard>(response);
   }
 
@@ -578,7 +578,7 @@ Return ONLY a valid JSON array: [{"front":"...","back":"...","choices":["A","B",
     const response = await this.completeWithFallback([
       { role: "system", content: systemPrompt },
       { role: "user", content: `Generate ${count} multiple-choice questions from this text:\n\n${chunk}` },
-    ], { ...options, model, temperature: 0.5, maxTokens: 2500 }, model);
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 }, model);
     return parseJsonArray<GeneratedQuestion>(response).map((q) => ({
       front: q.front,
       back: q.back,
@@ -737,7 +737,7 @@ Rules:
     for await (const chunk of this.streamComplete([
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
-    ], { ...options, model, temperature: 0.5 })) {
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 })) {
       fullResponse += chunk;
     }
 
@@ -770,7 +770,7 @@ Rules:
     for await (const chunk of this.streamComplete([
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
-    ], { ...options, model, temperature: 0.5 })) {
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 })) {
       fullResponse += chunk;
     }
 
