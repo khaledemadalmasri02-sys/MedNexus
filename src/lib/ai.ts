@@ -227,6 +227,9 @@ export function parseJsonArray<T extends Record<string, any>>(raw: string): T[] 
     if ("answer" in normalized && back === obj.answer) delete normalized.answer;
     out.push(normalized as T);
   }
+  if (out.length === 0) {
+    throw new Error("Invalid response format from AI: no valid cards found in response");
+  }
   return out;
 }
 
@@ -373,37 +376,32 @@ export class AIService {
       throw new Error(`AI API error: ${response.status} - ${error}`);
     }
     const data = (await response.json().catch(() => null)) as
-      | { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
+      | { choices?: Array<{ message?: { content?: string } }> }
       | null;
     const content = data?.choices?.[0]?.message?.content ?? "";
-    const reasoningContent = data?.choices?.[0]?.message?.reasoning_content ?? "";
-    const finalContent = content || reasoningContent;
-    if (!finalContent.trim()) {
+    if (!content.trim()) {
       throw new Error("Invalid response format from AI: empty completion (no JSON content)");
     }
-    return finalContent;
+    return content;
   }
 
-  // If the primary (local/tunnel) provider fails, retry once against a hosted
-  // provider (OpenRouter) when its key is configured. This keeps generation
-  // working from the deployed Worker even when the self-hosted tunnel is down
-  // or the local model stalls. Returns the content or rethrows a fallback-safe
-  // error so the route still degrades to offline generation.
   private async completeWithFallback(messages: Message[], options: GenerateOptions, attemptedModel: string): Promise<string> {
     try {
       return await this.complete(messages, options);
     } catch (primaryErr) {
       const { provider } = parseModel(attemptedModel);
-      if (isLocalProvider(provider) && this.config.OPENROUTER_API_KEY) {
-        logger.warn({ err: (primaryErr as Error)?.message, model: attemptedModel }, "Local AI failed, retrying via OpenRouter");
-        const fallbackModel = options.model?.includes("qbank") ? "openrouter/qwen/qwen3.5-9b"
-          : options.model?.includes("vision") ? "openrouter/qwen/qwen3-vl-8b-instruct"
-          : "openrouter/qwen/qwen3.5-9b";
-        try {
-          return await this.complete(messages, { ...options, model: fallbackModel });
-        } catch (fbErr) {
-          logger.warn({ err: (fbErr as Error)?.message }, "OpenRouter fallback also failed");
-          throw primaryErr;
+      if (isLocalProvider(provider)) {
+        logger.warn({ err: (primaryErr as Error)?.message, model: attemptedModel }, "Local AI failed, retrying locally");
+        const fallbackModel = options.model?.includes("qbank") ? this.config.AI_QBANK_MODEL
+          : options.model?.includes("vision") ? this.config.AI_VISION_MODEL
+          : this.config.AI_TEXT_MODEL;
+        if (fallbackModel && fallbackModel !== "not configured") {
+          try {
+            return await this.complete(messages, { ...options, model: fallbackModel });
+          } catch (fbErr) {
+            logger.warn({ err: (fbErr as Error)?.message }, "Local AI fallback also failed");
+            throw primaryErr;
+          }
         }
       }
       throw primaryErr;
@@ -460,13 +458,9 @@ export class AIService {
           try {
             const parsed = JSON.parse(data);
             const content = parsed.choices[0]?.delta?.content;
-            const reasoningContent = parsed.choices[0]?.delta?.reasoning_content;
             if (content) {
               hasContent = true;
               yield content;
-            } else if (reasoningContent) {
-              hasContent = true;
-              yield reasoningContent;
             }
           } catch { /* skip malformed */ }
         }
@@ -530,12 +524,22 @@ export class AIService {
 
   private async generateCardsChunk(chunk: string, count: number, options: GenerateOptions, model: string): Promise<GeneratedCard[]> {
     const systemPrompt = `You are an expert flashcard creator. Generate ${count} high-quality flashcards from the provided text.
+
 Rules:
-- Each card should test one key concept
-- Front: a clear question or prompt
-- Back: a concise, accurate answer
-- Include relevant tags
-Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
+- Each card should test ONE key concept
+- Front: a clear, specific question or prompt (1-2 sentences max)
+- Back: a concise, accurate answer (1-3 sentences max)  
+- Include relevant tags as an array of strings
+- Each card must have NON-EMPTY front and back after trimming
+- Return ONLY a valid JSON array - nothing else, no code fences, no explanations
+
+VALIDATION (MUST FOLLOW):
+- Validate each card: front and back must be non-empty strings
+- Count must match the number of cards returned
+- Tags array can be empty but must be valid JSON
+- If any card fails validation, regenerate that card only
+
+Return format: [{"front":"?","back":"?","tags":[]}]`;
     const response = await this.completeWithFallback([
       { role: "system", content: systemPrompt },
       { role: "user", content: `Generate ${count} flashcards from this text:\n\n${chunk}` },
@@ -569,12 +573,24 @@ Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
 
   private async generateQuestionsChunk(chunk: string, count: number, options: GenerateOptions, model: string): Promise<GeneratedQuestion[]> {
     const systemPrompt = `You are an expert question bank creator for medical exams. Generate ${count} multiple-choice questions from the provided text.
+
 Rules:
 - Test clinical reasoning; include a vignette when appropriate
-- Provide 4-5 plausible distractors
-- Mark the correct answer with correctIndex (0-based)
+- Provide 4-5 plausible distractors (choices array)
+- Mark the correct answer with correctIndex (0-based integer)
 - Include a detailed explanation
-Return ONLY a valid JSON array: [{"front":"...","back":"...","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
+- Front and back must be non-empty strings after trimming
+- Choices must be an array of non-empty strings
+- correctIndex must be a valid integer within choices array bounds
+
+VALIDATION (MUST FOLLOW):
+- Validate each question: front, back, choices, correctIndex all present
+- Choices array must have 3-5 items
+- correctIndex must be >= 0 and < choices.length
+- Explanation is optional but recommended
+- Return ONLY a valid JSON array - nothing else
+
+Return format: [{"front":"?","back":"?","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
     const response = await this.completeWithFallback([
       { role: "system", content: systemPrompt },
       { role: "user", content: `Generate ${count} multiple-choice questions from this text:\n\n${chunk}` },
@@ -603,21 +619,7 @@ Answer/Back: ${this.sanitizePromptInput(back)}`;
         { role: "user", content: userPrompt },
       ], { ...options, model, temperature: 0.7, maxTokens: 2048 });
     } catch (err) {
-      // Local model (LM Studio / Ollama) is often unavailable on the edge.
-      // Retry once against OpenRouter (key is configured) so StudyPilot still
-      // gets a real, structured explanation instead of the offline fallback.
-      if (this.config.OPENROUTER_API_KEY && !String(model).startsWith("openrouter/")) {
-        logger.warn({ err }, "StudyPilot explain local AI failed, retrying via OpenRouter");
-        try {
-          return await this.complete([
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ], { ...options, model: "openrouter/deepseek/deepseek-r1-distill-llama-70b", temperature: 0.7, maxTokens: 2048 });
-        } catch (err2) {
-          logger.warn({ err: err2 }, "StudyPilot explain OpenRouter fallback failed");
-          throw err;
-        }
-      }
+      logger.warn({ err }, "Local AI explain failed");
       throw err;
     }
   }
@@ -705,7 +707,7 @@ Do NOT add any commentary before the first card or after the last.`;
     return this.parseBatch(raw);
   }
 
-async *streamExplainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): AsyncGenerator<string> {
+  async *streamExplainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): AsyncGenerator<string> {
     const model = options.model || this.config.AI_EXPLAIN_MODEL;
     const systemPrompt = `You are an expert medical educator creating study materials for medical students. ${MODE_PROMPTS[mode]}
 
@@ -723,12 +725,22 @@ Answer/Back: ${this.sanitizePromptInput(back)}`;
   async *streamGenerateCards(text: string, count = 10, options: GenerateOptions = {}): AsyncGenerator<{ type: "progress" | "card"; data: GeneratedCard | { message: string } }> {
     const model = options.model || this.config.AI_TEXT_MODEL;
     const systemPrompt = `You are an expert flashcard creator. Generate ${count} high-quality flashcards from the provided text.
+
 Rules:
-- Each card should test one key concept
-- Front: a clear question or prompt
-- Back: a concise, accurate answer
-- Include relevant tags
-- Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
+- Each card should test ONE key concept
+- Front: a clear, specific question or prompt (1-2 sentences max)
+- Back: a concise, accurate answer (1-3 sentences max)  
+- Include relevant tags as an array of strings
+- Each card must have NON-EMPTY front and back after trimming
+- Return ONLY a valid JSON array - nothing else, no code fences, no explanations
+
+VALIDATION (MUST FOLLOW):
+- Validate each card: front and back must be non-empty strings
+- Count must match the number of cards returned
+- Tags array can be empty but must be valid JSON
+- If any card fails validation, regenerate that card only
+
+Return format: [{"front":"?","back":"?","tags":[]}]`;
     const userPrompt = `Generate ${count} flashcards from this text:\n\n${this.sanitizePromptInput(text)}`;
 
     yield { type: "progress", data: { message: "Generating flashcards..." } };
@@ -741,12 +753,7 @@ Rules:
       fullResponse += chunk;
     }
 
-    const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error("Invalid response format from AI: no JSON array found");
-    }
-
-    const cards = parseJsonArray<GeneratedCard>(jsonMatch[0]);
+    const cards = parseJsonArray<GeneratedCard>(fullResponse);
     for (const card of cards) {
       yield { type: "card", data: card };
     }
@@ -756,12 +763,24 @@ Rules:
   async *streamGenerateQuestions(text: string, count = 10, options: GenerateOptions = {}): AsyncGenerator<{ type: "progress" | "card"; data: GeneratedQuestion | { message: string } }> {
     const model = options.model || this.config.AI_QBANK_MODEL;
     const systemPrompt = `You are an expert question bank creator for medical exams. Generate ${count} multiple-choice questions from the provided text.
+
 Rules:
 - Test clinical reasoning; include a vignette when appropriate
-- Provide 4-5 plausible distractors
-- Mark the correct answer with correctIndex (0-based)
+- Provide 4-5 plausible distractors (choices array)
+- Mark the correct answer with correctIndex (0-based integer)
 - Include a detailed explanation
-- Return ONLY a valid JSON array: [{"front":"...","back":"...","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
+- Front and back must be non-empty strings after trimming
+- Choices must be an array of non-empty strings
+- correctIndex must be a valid integer within choices array bounds
+
+VALIDATION (MUST FOLLOW):
+- Validate each question: front, back, choices, correctIndex all present
+- Choices array must have 3-5 items
+- correctIndex must be >= 0 and < choices.length
+- Explanation is optional but recommended
+- Return ONLY a valid JSON array - nothing else
+
+Return format: [{"front":"?","back":"?","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
     const userPrompt = `Generate ${count} multiple-choice questions from this text:\n\n${this.sanitizePromptInput(text)}`;
 
     yield { type: "progress", data: { message: "Generating questions..." } };
@@ -774,12 +793,7 @@ Rules:
       fullResponse += chunk;
     }
 
-    const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error("Invalid response format from AI: no JSON array found");
-    }
-
-    const questions = parseJsonArray<GeneratedQuestion>(jsonMatch[0]).map((q) => ({
+    const questions = parseJsonArray<GeneratedQuestion>(fullResponse).map((q) => ({
       front: q.front,
       back: q.back,
       choices: Array.isArray(q.choices) ? q.choices.filter((c) => typeof c === "string") : [],

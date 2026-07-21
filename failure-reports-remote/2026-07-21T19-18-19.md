@@ -1,0 +1,19 @@
+# Generation Failure Report
+
+> Generated: 2026-07-21T19:18:19.090Z
+
+## Summary
+
+| Metric | Count |
+|--------|-------|
+| Total failures | 0 |
+| Unique patterns | 0 |
+| Auth errors | 0 |
+| Rate limit | 0 |
+| Network errors | 0 |
+| Timeout | 0 |
+| Parse errors | 0 |
+| Model errors | 0 |
+| Unknown | 0 |
+
+_No failures recorded._

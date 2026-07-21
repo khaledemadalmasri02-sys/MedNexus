@@ -15,7 +15,9 @@
     "build:frontend": "node scripts/copy-frontend.mjs",
     "dev": "npm run build:frontend && wrangler dev",
     "deploy": "npm run build:frontend && wrangler deploy",
-    "tunnel": "node scripts/tunnel.mjs"
+    "tunnel": "node scripts/tunnel.mjs",
+    "failures:export": "node scripts/export-failures.mjs",
+    "failures:export:remote": "node scripts/export-failures.mjs --remote"
   },
   "dependencies": {
     "drizzle-orm": "^0.36.4",

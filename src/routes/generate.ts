@@ -7,6 +7,7 @@ import { createAIService, type GeneratedCard, type GeneratedQuestion, type Gener
 import { offlineGenerator } from "../lib/offline-generator";
 import { validate, generateSchema } from "../middleware/validate";
 import { logger } from "../lib/logger";
+import { captureGenerationError } from "../lib/error-capture";
 
 export const generateRoutes = new Hono<AppEnv>();
 
@@ -193,6 +194,13 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
     } catch (aiErr) {
       logger.warn({ err: (aiErr as Error)?.message, deckType }, "AI generation failed, using offline fallback");
       usedOfflineFallback = true;
+      await captureGenerationError(getDb(c), aiErr as Error, {
+        userId,
+        operation: `generate:${deckType}`,
+        model,
+        inputText: text,
+        extra: { deckName, cardCount: requestedCount, fallback: "offline" },
+      });
       generatedItems = offlineGenerate(deckType, text, cardCount);
     }
 
@@ -257,6 +265,13 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
   } catch (err) {
     const duration = Date.now() - startTime;
     await logGeneration(c, userId, deckType, model, false, (err as Error).message, duration);
+    await captureGenerationError(getDb(c), err as Error, {
+      userId,
+      operation: `generate:${deckType}`,
+      model,
+      inputText: text,
+      extra: { deckName, cardCount: requestedCount, durationMs: duration },
+    });
     const isAuth = isAuthError(err as Error);
     return c.json(
       {
@@ -325,15 +340,14 @@ generateRoutes.post("/generate/stream", async (c) => {
           let questions: GeneratedQuestion[] = [];
           try {
             questions = await ai.generateQuestions(text, cardCount, genOptions);
-          } catch (aiErr) {
-            const err = aiErr as Error;
-            if (isAuthError(err) || isParseError(err)) {
-              usedOfflineFallback = true;
-              send("status", { message: "AI service unavailable, using offline generator..." });
-              questions = offlineGenerator.generateQuestions(text, cardCount) as GeneratedQuestion[];
-            } else {
-              throw err;
+            if (!questions || questions.length === 0) {
+              throw new Error("AI returned empty questions");
             }
+          } catch (aiErr) {
+            logger.warn({ err: (aiErr as Error)?.message }, "AI question generation failed, using offline fallback");
+            usedOfflineFallback = true;
+            send("status", { message: "AI service unavailable, using offline generator..." });
+            questions = offlineGenerator.generateQuestions(text, cardCount) as GeneratedQuestion[];
           }
           for (const q of questions) {
             const question = normalizeQbankItem(q);
@@ -376,33 +390,60 @@ generateRoutes.post("/generate/stream", async (c) => {
                 send("card", card);
               }
             }
-          } catch (aiErr) {
-            const err = aiErr as Error;
-            if (isAuthError(err) || isParseError(err)) {
-              usedOfflineFallback = true;
-              send("status", { message: "AI service unavailable, using offline generator..." });
-              for await (const event of offlineGenerator.streamGenerateCards(text, cardCount)) {
-                if (event.type === "progress") {
-                  send("status", event.data);
-                } else if (event.type === "card") {
-                  const card = event.data as GeneratedCard;
-                  cardsToInsert.push({
-                    deckId: deck.id,
-                    front: card.front,
-                    back: card.back,
-                    tags: card.tags?.join(",") || null,
-                    cardType: "basic",
-                    choices: null,
-                    correctIndex: null,
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
-                  });
-                  send("card", card);
-                }
-              }
-            } else {
-              throw err;
+            if (cardsToInsert.length === 0) {
+              throw new Error("AI returned empty cards");
             }
+          } catch (aiErr) {
+            logger.warn({ err: (aiErr as Error)?.message }, "AI stream card generation failed, using offline fallback");
+            usedOfflineFallback = true;
+            send("status", { message: "AI service unavailable, using offline generator..." });
+            cardsToInsert.length = 0;
+            for await (const event of offlineGenerator.streamGenerateCards(text, cardCount)) {
+              if (event.type === "progress") {
+                send("status", event.data);
+              } else if (event.type === "card") {
+                const card = event.data as GeneratedCard;
+                cardsToInsert.push({
+                  deckId: deck.id,
+                  front: card.front,
+                  back: card.back,
+                  tags: card.tags?.join(",") || null,
+                  cardType: "basic",
+                  choices: null,
+                  correctIndex: null,
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                });
+                send("card", card);
+              }
+            }
+          }
+        }
+
+        if (cardsToInsert.length === 0) {
+          usedOfflineFallback = true;
+          const ensured = ensureNonEmpty([], deckType, text, cardCount);
+          for (const item of ensured.items) {
+            const isQuestion = "choices" in item;
+            const question = isQuestion ? normalizeQbankItem(item as GeneratedQuestion) : null;
+            const cardItem = {
+              deckId: deck.id,
+              front: item.front,
+              back: item.back,
+              tags: (item as GeneratedCard).tags?.join(",") || null,
+              cardType: isQuestion ? "mcq" : "basic",
+              choices: question?.choices ? JSON.stringify(question.choices) : null,
+              correctIndex: question?.correctIndex ?? null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            };
+            cardsToInsert.push(cardItem);
+            send("card", {
+              front: item.front,
+              back: item.back,
+              choices: question?.choices,
+              correctIndex: question?.correctIndex,
+            });
           }
         }
 
@@ -434,6 +475,13 @@ generateRoutes.post("/generate/stream", async (c) => {
         const duration = Date.now() - startTime;
         logger.error({ err, deckType }, "Stream generation failed");
         await logGeneration(c, userId, deckType, model, false, (err as Error).message, duration);
+        await captureGenerationError(getDb(c), err as Error, {
+          userId,
+          operation: `generate:stream:${deckType}`,
+          model,
+          inputText: text,
+          extra: { deckName, cardCount: requestedCount, durationMs: duration },
+        });
         const isAuth = isAuthError(err as Error);
         send("error", {
           message: isAuth

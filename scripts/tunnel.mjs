@@ -100,8 +100,6 @@ function installCloudflared() {
 // Update wrangler.toml's LOCAL_AI_URL. Tolerant of the key being absent
 // (appends a [vars] entry) or present (replaces in place).
 function updateWrangler(tunnelUrl) {
-  // The URL passed in may already end in /v1 (named tunnel) or not (quick
-  // tunnel). Normalize to exactly one trailing /v1.
   const base = tunnelUrl.replace(/\/v1\/?$/, "").replace(/\/+$/, "");
   const newUrl = `${base}/v1`;
   let content = readFileSync(wranglerPath, "utf8");
@@ -109,7 +107,7 @@ function updateWrangler(tunnelUrl) {
   if (re.test(content)) {
     content = content.replace(re, `LOCAL_AI_URL = "${newUrl}"`);
   } else if (/\[vars\]/.test(content)) {
-    content = content.replace(/\[vars\]/, `[vars]\nLOCAL_AI_URL = "${newUrl}"`);
+    content = content.replace(/\[vars\]/m, `[vars]\nLOCAL_AI_URL = "${newUrl}"`);
   } else {
     content += `\n[vars]\nLOCAL_AI_URL = "${newUrl}"\n`;
   }

@@ -566,7 +566,6 @@ function StudyTab({
         </p>
         <ol className="space-y-2">
           {planModules.map((m, i) => {
-            const done = i < step && !allDone ? false : i < step;
             const isCurrent = i === step && !allDone;
             return (
               <li key={m.deckId}>

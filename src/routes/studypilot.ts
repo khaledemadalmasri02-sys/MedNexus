@@ -20,6 +20,7 @@ import {
   type RawCard,
   type ModuleCluster,
 } from "../studypilot/planner";
+import { captureGenerationError, type CaptureContext } from "../lib/error-capture";
 
 export const studypilotRoutes = new Hono<AppEnv>();
 
@@ -129,10 +130,20 @@ studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) =>
 
     // ── AI-first card generation ──
     let items: GeneratedCard[] = [];
+    let aiError: Error | null = null;
     try {
       items = await ai.generateCards(cleaned, Math.max(5, Math.ceil(words / 40)), genOptions);
       usedAi = true;
     } catch (e) {
+      aiError = e as Error;
+      const db = getDb(c as any);
+      await captureGenerationError(db, e as Error, {
+        userId,
+        operation: "studypilot:ingest:ai",
+        model: getConfig(c.env).AI_TEXT_MODEL,
+        inputText: cleaned,
+        extra: { fallback: "heuristic", source: (c as any).get("validated")?.source },
+      });
       if (isAiDownError(e)) {
         usedAi = false;
       } else {
@@ -226,6 +237,14 @@ studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) =>
   } catch (err) {
     logger.error({ err }, "StudyPilot ingest failed");
     await logGeneration(c as any, getUserId(c as any), "studypilot", "error", false, (err as Error)?.message);
+    const db = getDb(c as any);
+    await captureGenerationError(db, err as Error, {
+      userId: getUserId(c as any),
+      operation: "studypilot:ingest",
+      model: getConfig((c as any).env).AI_TEXT_MODEL,
+      inputText: (c as any).get("validated")?.text || "",
+      extra: { source: (c as any).get("validated")?.source },
+    });
     return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to ingest material" } }, 500);
   }
 });
@@ -289,6 +308,14 @@ studypilotRoutes.post("/studypilot/explain", validate(explainSchema), async (c) 
       }
     } catch (e) {
       logger.warn({ err: e }, "StudyPilot explain AI failed, returning offline heuristic");
+      const db = getDb(c);
+      await captureGenerationError(db, e as Error, {
+        userId,
+        operation: "studypilot:explain",
+        model: getConfig(c.env).AI_EXPLAIN_MODEL,
+        inputText: `${front}\n${back}`,
+        extra: { cardId, fallback: "heuristic" },
+      });
     }
 
     // Do NOT persist the offline fallback — if we did, the next study session

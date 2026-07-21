@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { AppEnv } from "../types";
-import { cards } from "../db/index";
-import { getDb } from "../lib/helpers";
+import { cards, errorLogs, generationLogs } from "../db/index";
+import { getDb, getUserId } from "../lib/helpers";
 import { createAIService, type AIService, type ExplainMode } from "../lib/ai";
 import { logger } from "../lib/logger";
+import { captureGenerationError } from "../lib/error-capture";
+import { getConfig } from "../lib/config";
 
 // Maximum number of simultaneous AI requests. Kept at 3 so we don't
 // flood the provider and get rate-limited; generation still covers every card.
@@ -79,7 +81,7 @@ async function getExplanationStats(deckId: number, db: any): Promise<{
   };
 }
 
-async function generateExplanationsForDeck(deckId: number, db: any, ai: AIService): Promise<void> {
+async function generateExplanationsForDeck(deckId: number, db: any, ai: AIService, model: string): Promise<void> {
   const existing = progressStore.get(deckId);
   if (existing?.status === "running") {
     logger.info({ deckId }, "Explanation generation already running");
@@ -175,8 +177,6 @@ async function generateExplanationsForDeck(deckId: number, db: any, ai: AIServic
             }
           } catch (err) {
             if (isRateLimit(err)) {
-              // Stop the whole run early so we don't burn the rest of a
-              // tiny daily quota on guaranteed-failing requests.
               aborted = true;
               rateLimitMsg = "OpenRouter free-model quota exhausted (50 requests/day). Add credits to your OpenRouter key, or wait for the daily reset, then retry.";
               progress.failed += chunk.length;
@@ -185,6 +185,13 @@ async function generateExplanationsForDeck(deckId: number, db: any, ai: AIServic
             }
             progress.failed += chunk.length;
             logger.error({ err, deckId }, "Failed to generate explanations for a batch of cards");
+            await captureGenerationError(db, err as Error, {
+              userId: null,
+              operation: "explanations:batch",
+              model,
+              inputText: chunk.map((cd: any) => cd.front + "\n" + (cd.back || "")).join("\n---\n"),
+              extra: { deckId, batchIndex: i, batchSize: chunk.length },
+            });
           }
           progressStore.set(deckId, { ...progress });
         }
@@ -208,6 +215,13 @@ async function generateExplanationsForDeck(deckId: number, db: any, ai: AIServic
     progress.error = (err as Error).message;
     progress.completedAt = new Date();
     logger.error({ err, deckId }, "Explanation generation failed");
+    await captureGenerationError(db, err as Error, {
+      userId: null,
+      operation: "explanations:deck",
+      model,
+      inputText: "",
+      extra: { deckId, completed: progress.completed, failed: progress.failed },
+    });
   }
 
   progressStore.set(deckId, { ...progress });
@@ -231,12 +245,31 @@ explanationRoutes.post("/explanations/generate/:deckId", async (c) => {
     }
 
     const ai = createAIService(c.env);
-    const promise = generateExplanationsForDeck(deckId, db, ai);
+    const model = getConfig(c.env).AI_EXPLAIN_MODEL;
+    const promise = generateExplanationsForDeck(deckId, db, ai, model);
     const ec = (c as any).executionCtx;
     if (ec && typeof ec.waitUntil === "function") {
-      ec.waitUntil(promise.catch((err) => logger.error({ err, deckId }, "Background explanation generation failed")));
+      ec.waitUntil(promise.catch(async (err) => {
+        logger.error({ err, deckId }, "Background explanation generation failed");
+        await captureGenerationError(getDb(c), err as Error, {
+          userId: getUserId(c),
+          operation: "explanations:background",
+          model: getConfig(c.env).AI_EXPLAIN_MODEL,
+          inputText: "",
+          extra: { deckId },
+        });
+      }));
     } else {
-      promise.catch((err) => logger.error({ err, deckId }, "Background explanation generation failed"));
+      promise.catch(async (err) => {
+        logger.error({ err, deckId }, "Background explanation generation failed");
+        await captureGenerationError(getDb(c), err as Error, {
+          userId: getUserId(c),
+          operation: "explanations:background",
+          model: getConfig(c.env).AI_EXPLAIN_MODEL,
+          inputText: "",
+          extra: { deckId },
+        });
+      });
     }
 
     return c.json({
@@ -246,6 +279,13 @@ explanationRoutes.post("/explanations/generate/:deckId", async (c) => {
     });
   } catch (err) {
     logger.error({ err, deckId }, "Failed to start explanation generation");
+    await captureGenerationError(getDb(c), err as Error, {
+      userId: getUserId(c),
+      operation: "explanations:start",
+      model: getConfig(c.env).AI_EXPLAIN_MODEL,
+      inputText: "",
+      extra: { deckId },
+    });
     return c.json({ error: { code: "GENERATION_ERROR", message: "Failed to start explanation generation" } }, 500);
   }
 });

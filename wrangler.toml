@@ -19,6 +19,15 @@ NODE_ENV = "production"
 FREE_MAX_DECKS = "100"
 FREE_MAX_CARDS_PER_DECK = "200"
 APP_URL = "https://mednexus.fit"
+# LOCAL_AI_URL: Cloudflare tunnel URL for production
+# Points to LM Studio at 192.168.100.205:1234 via tunnel
+LOCAL_AI_URL = "https://ai.mednexus.fit/v1"
+AI_TEXT_MODEL = "local/qwen/qwen3-vl-4b"
+AI_VISION_MODEL = "local/qwen/qwen3-vl-4b"
+AI_QBANK_MODEL = "local/qwen/qwen3-vl-4b"
+AI_EXPLAIN_MODEL = "local/qwen/qwen3-vl-4b"
+STUDY_BUDDY_MODEL = "local/qwen/qwen3-vl-4b"
+GOOGLE_CLIENT_ID = "911372032508-7oi1o2s1o76c3uhiajj9eiuong17ulr3.apps.googleusercontent.com"
 
 routes = [
   { pattern = "mednexus.fit", zone_name = "mednexus.fit" },
@@ -32,14 +41,6 @@ routes = [
 # token lives in .tunnel-state.json (tunnel "mednexus"):
 #   cloudflared login
 #   cloudflared tunnel token mednexus   # paste output into .tunnel-state.json "token"
-LOCAL_AI_URL = "https://ai.mednexus.fit/v1"
-AI_TEXT_MODEL = "local/qwen/qwen3-4b-2507"
-AI_VISION_MODEL = "local/qwen/qwen3-vl-4b"
-AI_QBANK_MODEL = "local/qwen/qwen3-4b-2507"
-AI_EXPLAIN_MODEL = "local/qwen/qwen3-4b-2507"
-STUDY_BUDDY_MODEL = "local/qwen/qwen3-4b-2507"
-GOOGLE_CLIENT_ID = "911372032508-7oi1o2s1o76c3uhiajj9eiuong17ulr3.apps.googleusercontent.com"
-
 # Card generation tuning (optional). Concurrency = chunks generated in parallel.
 # There is intentionally NO overall deadline: generation runs until the model
 # finishes every chunk (it is unbounded by wall-clock). Only a client disconnect
