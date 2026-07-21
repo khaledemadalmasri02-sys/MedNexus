@@ -355,6 +355,7 @@ export class AIService {
         // leave `content` empty unless thinking is disabled. Disable it so the
         // OpenAI-style completion we parse comes back in `message.content`.
         enable_thinking: false,
+        reasoning_format: "none",
       }),
     };
     if (options.signal) init.signal = options.signal;
@@ -372,17 +373,15 @@ export class AIService {
       throw new Error(`AI API error: ${response.status} - ${error}`);
     }
     const data = (await response.json().catch(() => null)) as
-      | { choices?: Array<{ message?: { content?: string } }> }
+      | { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
       | null;
     const content = data?.choices?.[0]?.message?.content ?? "";
-    // Local/self-hosted servers sometimes answer 200 but stream no usable
-    // content (model not actually loaded, stalled generation). Treat empty
-    // output as a parse failure so callers fall back to offline generation
-    // instead of producing a deck with zero cards.
-    if (!content.trim()) {
+    const reasoningContent = data?.choices?.[0]?.message?.reasoning_content ?? "";
+    const finalContent = content || reasoningContent;
+    if (!finalContent.trim()) {
       throw new Error("Invalid response format from AI: empty completion (no JSON content)");
     }
-    return content;
+    return finalContent;
   }
 
   // If the primary (local/tunnel) provider fails, retry once against a hosted
@@ -434,6 +433,7 @@ export class AIService {
         max_tokens: options.maxTokens ?? 8192,
         stream: true,
         enable_thinking: false,
+        reasoning_format: "none",
       }),
     }, `stream:${model}`, provider, this.config.LOCAL_AI_TIMEOUT_MS);
     if (!response.ok) {
@@ -444,6 +444,7 @@ export class AIService {
     if (!reader) throw new Error("No response body");
     const decoder = new TextDecoder();
     let buffer = "";
+    let hasContent = false;
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -459,9 +460,19 @@ export class AIService {
           try {
             const parsed = JSON.parse(data);
             const content = parsed.choices[0]?.delta?.content;
-            if (content) yield content;
+            const reasoningContent = parsed.choices[0]?.delta?.reasoning_content;
+            if (content) {
+              hasContent = true;
+              yield content;
+            } else if (reasoningContent) {
+              hasContent = true;
+              yield reasoningContent;
+            }
           } catch { /* skip malformed */ }
         }
+      }
+      if (!hasContent) {
+        throw new Error("Invalid response format from AI: empty streaming response (no JSON content)");
       }
     } finally {
       reader.releaseLock();
@@ -694,11 +705,11 @@ Do NOT add any commentary before the first card or after the last.`;
     return this.parseBatch(raw);
   }
 
-  async *streamExplainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): AsyncGenerator<string> {
+async *streamExplainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): AsyncGenerator<string> {
     const model = options.model || this.config.AI_EXPLAIN_MODEL;
     const systemPrompt = `You are an expert medical educator creating study materials for medical students. ${MODE_PROMPTS[mode]}
 
-IMPORTANT: Return ONLY the formatted Markdown content. No meta-commentary.`;
+    IMPORTANT: Return ONLY the formatted Markdown content. No meta-commentary.`;
     const userPrompt = `Generate a ${mode === "full" ? "comprehensive full explanation" : mode + " explanation"} for this medical concept:
 
 Question/Front: ${this.sanitizePromptInput(front)}
@@ -707,6 +718,79 @@ Answer/Back: ${this.sanitizePromptInput(back)}`;
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ], { ...options, model, temperature: 0.7, maxTokens: 2048 });
+  }
+
+  async *streamGenerateCards(text: string, count = 10, options: GenerateOptions = {}): AsyncGenerator<{ type: "progress" | "card"; data: GeneratedCard | { message: string } }> {
+    const model = options.model || this.config.AI_TEXT_MODEL;
+    const systemPrompt = `You are an expert flashcard creator. Generate ${count} high-quality flashcards from the provided text.
+Rules:
+- Each card should test one key concept
+- Front: a clear question or prompt
+- Back: a concise, accurate answer
+- Include relevant tags
+- Return ONLY a valid JSON array: [{"front":"...","back":"...","tags":["t1"]}]`;
+    const userPrompt = `Generate ${count} flashcards from this text:\n\n${this.sanitizePromptInput(text)}`;
+
+    yield { type: "progress", data: { message: "Generating flashcards..." } };
+
+    let fullResponse = "";
+    for await (const chunk of this.streamComplete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ], { ...options, model, temperature: 0.5 })) {
+      fullResponse += chunk;
+    }
+
+    const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error("Invalid response format from AI: no JSON array found");
+    }
+
+    const cards = parseJsonArray<GeneratedCard>(jsonMatch[0]);
+    for (const card of cards) {
+      yield { type: "card", data: card };
+    }
+    yield { type: "progress", data: { message: `Generated ${cards.length} cards` } };
+  }
+
+  async *streamGenerateQuestions(text: string, count = 10, options: GenerateOptions = {}): AsyncGenerator<{ type: "progress" | "card"; data: GeneratedQuestion | { message: string } }> {
+    const model = options.model || this.config.AI_QBANK_MODEL;
+    const systemPrompt = `You are an expert question bank creator for medical exams. Generate ${count} multiple-choice questions from the provided text.
+Rules:
+- Test clinical reasoning; include a vignette when appropriate
+- Provide 4-5 plausible distractors
+- Mark the correct answer with correctIndex (0-based)
+- Include a detailed explanation
+- Return ONLY a valid JSON array: [{"front":"...","back":"...","choices":["A","B","C","D"],"correctIndex":0,"explanation":"..."}]`;
+    const userPrompt = `Generate ${count} multiple-choice questions from this text:\n\n${this.sanitizePromptInput(text)}`;
+
+    yield { type: "progress", data: { message: "Generating questions..." } };
+
+    let fullResponse = "";
+    for await (const chunk of this.streamComplete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ], { ...options, model, temperature: 0.5 })) {
+      fullResponse += chunk;
+    }
+
+    const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error("Invalid response format from AI: no JSON array found");
+    }
+
+    const questions = parseJsonArray<GeneratedQuestion>(jsonMatch[0]).map((q) => ({
+      front: q.front,
+      back: q.back,
+      choices: Array.isArray(q.choices) ? q.choices.filter((c) => typeof c === "string") : [],
+      correctIndex: typeof q.correctIndex === "number" ? q.correctIndex : 0,
+      explanation: q.explanation,
+    }));
+
+    for (const question of questions) {
+      yield { type: "card", data: question };
+    }
+    yield { type: "progress", data: { message: `Generated ${questions.length} questions` } };
   }
 }
 
