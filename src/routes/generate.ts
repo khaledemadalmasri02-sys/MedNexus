@@ -148,6 +148,21 @@ function ensureNonEmpty(
       cards.push({ front: `Summarize: ${s.substring(0, 80)}...`, back: s, tags: ["generated"] });
     }
   }
+  if (cards.length === 0) {
+    const rawText = text.replace(/\s+/g, " ").trim().slice(0, 500);
+    const fallbackText = rawText.length > 20 ? rawText : (text.replace(/\s+/g, " ").trim() || "Generated content");
+    if (deckType === "qbank") {
+      cards.push({
+        front: "Which statement is supported by the text?",
+        back: fallbackText,
+        choices: [fallbackText, "None of the above", "Partially correct", "Incorrect"],
+        correctIndex: 0,
+        explanation: fallbackText,
+      });
+    } else {
+      cards.push({ front: `Summarize: ${fallbackText.substring(0, 80)}...`, back: fallbackText, tags: ["generated"] });
+    }
+  }
   return { items: cards.slice(0, cardCount), usedOffline: true };
 }
 
@@ -174,7 +189,7 @@ function sseResponse(stream: ReadableStream): Response {
 }
 
 generateRoutes.post("/generate", validate(generateSchema), async (c) => {
-  const { text, deckName, cardCount = 10, deckType = "deck" } = c.get("validated") as any;
+  const { text, deckName, cardCount = 10, deckType = "deck", parentId } = c.get("validated") as any;
 
   const userId = getUserId(c);
   const startTime = Date.now();
@@ -215,41 +230,67 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
         : `AI generated ${deckKind} from text input`,
       kind: deckKind,
       userId,
+      parentId: parentId || null,
       createdAt: new Date(),
       updatedAt: new Date(),
     }).returning();
 
-    const createdCards = await insertBatched(
-      getDb(c),
-      cards,
-      generatedItems.map((item) => {
-        const isQuestion = "choices" in item;
-        const question = isQuestion ? normalizeQbankItem(item as GeneratedQuestion) : null;
-        const card = !isQuestion ? (item as GeneratedCard) : null;
-        return {
-          deckId: deck.id,
-          front: item.front,
-          back: item.back,
-          tags: card?.tags?.join(",") || null,
-          cardType: isQuestion ? "mcq" : "basic",
-          choices: question?.choices ? JSON.stringify(question.choices) : null,
-          correctIndex: question?.correctIndex ?? null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        };
-      })
-    );
+    let createdCards: any[] = [];
+    let dbInsertFailed = false;
+    try {
+      createdCards = await insertBatched(
+        getDb(c),
+        cards,
+        generatedItems.map((item) => {
+          const isQuestion = "choices" in item;
+          const question = isQuestion ? normalizeQbankItem(item as GeneratedQuestion) : null;
+          const card = !isQuestion ? (item as GeneratedCard) : null;
+          return {
+            deckId: deck.id,
+            front: item.front,
+            back: item.back,
+            tags: card?.tags?.join(",") || null,
+            cardType: isQuestion ? "mcq" : "basic",
+            choices: question?.choices ? JSON.stringify(question.choices) : null,
+            correctIndex: question?.correctIndex ?? null,
+            subject: card?.subject ?? null,
+            organSystem: card?.organSystem ?? null,
+            difficulty: card && ["easy", "medium", "hard"].includes(card.difficulty || "") ? card.difficulty : null,
+            highYieldScore: card && typeof card.highYieldScore === "number" && !isNaN(card.highYieldScore) ? Math.max(0, Math.min(1, card.highYieldScore)) : 0.5,
+            source: "heuristic",
+            aiGenerated: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+        })
+      );
+    } catch (dbErr) {
+      dbInsertFailed = true;
+      const errMsg = (dbErr as Error)?.message || String(dbErr);
+      logger.error({ err: errMsg, deckId: deck.id, cardCount: generatedItems.length }, "Database insert failed in non-streaming endpoint");
+      await captureGenerationError(getDb(c), dbErr as Error, {
+        userId,
+        operation: "generate:db-insert",
+        model,
+        inputText: deckName,
+        extra: { cardCount: generatedItems.length, error: errMsg },
+      });
+    }
 
     const duration = Date.now() - startTime;
-    await logGeneration(
-      c,
-      userId,
-      deckKind,
-      usedOfflineFallback ? "offline-fallback" : model,
-      true,
-      undefined,
-      duration
-    );
+    try {
+      await logGeneration(
+        c,
+        userId,
+        deckKind,
+        usedOfflineFallback ? "offline-fallback" : model,
+        true,
+        undefined,
+        duration
+      );
+    } catch {
+      /* best-effort logging */
+    }
 
     return c.json({
       deck,
@@ -257,10 +298,12 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
       generationId: deck.id,
       duration,
       usedOfflineFallback,
-      partial: false,
+      partial: dbInsertFailed,
       requestedCount,
-      generatedCount: createdCards.length,
-      message: "Cards generated successfully. Use /explanations/generate/:deckId to generate study mode explanations.",
+      generatedCount: generatedItems.length,
+      message: dbInsertFailed
+        ? "Cards generated but failed to save to database. Please try again."
+        : "Cards generated successfully. Use /explanations/generate/:deckId to generate study mode explanations.",
     }, 201);
   } catch (err) {
     const duration = Date.now() - startTime;
@@ -288,8 +331,13 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
 });
 
 generateRoutes.post("/generate/stream", async (c) => {
+  const accept = c.req.header("accept") || "";
+  if (!accept.includes("text/event-stream")) {
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Client must accept text/event-stream" } }, 406);
+  }
+
   const body = await readJson(c);
-  const { text, deckName, cardCount = 10, deckType = "deck" } = body as any;
+  const { text, deckName, cardCount = 10, deckType = "deck", parentId } = body as any;
 
   if (!text || typeof text !== "string") {
     return c.json({ error: { code: "VALIDATION_ERROR", message: "Text content is required" } }, 400);
@@ -327,6 +375,7 @@ generateRoutes.post("/generate/stream", async (c) => {
           description: `AI generated ${deckType === "qbank" ? "qbank" : "deck"} from text input`,
           kind: deckType === "qbank" ? "qbank" : "deck",
           userId,
+          parentId: parentId || null,
           createdAt: new Date(),
           updatedAt: new Date(),
         }).returning();
@@ -359,6 +408,10 @@ generateRoutes.post("/generate/stream", async (c) => {
               cardType: "mcq",
               choices: question.choices ? JSON.stringify(question.choices) : null,
               correctIndex: question.correctIndex ?? null,
+              subject: null,
+              organSystem: null,
+              difficulty: null,
+              highYieldScore: 0.5,
               createdAt: new Date(),
               updatedAt: new Date(),
             });
@@ -384,6 +437,12 @@ generateRoutes.post("/generate/stream", async (c) => {
                   cardType: "basic",
                   choices: null,
                   correctIndex: null,
+                  subject: card.subject ?? null,
+                  organSystem: card.organSystem ?? null,
+                  difficulty: ["easy", "medium", "hard"].includes(card.difficulty || "") ? card.difficulty : null,
+                  highYieldScore: typeof card.highYieldScore === "number" && !isNaN(card.highYieldScore) ? Math.max(0, Math.min(1, card.highYieldScore)) : 0.5,
+                  source: "heuristic",
+                  aiGenerated: false,
                   createdAt: new Date(),
                   updatedAt: new Date(),
                 });
@@ -397,7 +456,6 @@ generateRoutes.post("/generate/stream", async (c) => {
             logger.warn({ err: (aiErr as Error)?.message }, "AI stream card generation failed, using offline fallback");
             usedOfflineFallback = true;
             send("status", { message: "AI service unavailable, using offline generator..." });
-            cardsToInsert.length = 0;
             for await (const event of offlineGenerator.streamGenerateCards(text, cardCount)) {
               if (event.type === "progress") {
                 send("status", event.data);
@@ -411,6 +469,12 @@ generateRoutes.post("/generate/stream", async (c) => {
                   cardType: "basic",
                   choices: null,
                   correctIndex: null,
+                  subject: card.subject ?? null,
+                  organSystem: card.organSystem ?? null,
+                  difficulty: ["easy", "medium", "hard"].includes(card.difficulty || "") ? card.difficulty : null,
+                  highYieldScore: typeof card.highYieldScore === "number" && !isNaN(card.highYieldScore) ? Math.max(0, Math.min(1, card.highYieldScore)) : 0.5,
+                  source: "heuristic",
+                  aiGenerated: false,
                   createdAt: new Date(),
                   updatedAt: new Date(),
                 });
@@ -426,16 +490,27 @@ generateRoutes.post("/generate/stream", async (c) => {
           for (const item of ensured.items) {
             const isQuestion = "choices" in item;
             const question = isQuestion ? normalizeQbankItem(item as GeneratedQuestion) : null;
-            const cardItem = {
-              deckId: deck.id,
-              front: item.front,
-              back: item.back,
-              tags: (item as GeneratedCard).tags?.join(",") || null,
-              cardType: isQuestion ? "mcq" : "basic",
-              choices: question?.choices ? JSON.stringify(question.choices) : null,
-              correctIndex: question?.correctIndex ?? null,
-              createdAt: new Date(),
-              updatedAt: new Date(),
+            const itemCard = item as GeneratedCard;
+              const validatedDifficulty = ["easy", "medium", "hard"].includes(itemCard.difficulty || "") ? itemCard.difficulty : null;
+              const validatedHighYieldScore = typeof itemCard.highYieldScore === "number" && !isNaN(itemCard.highYieldScore)
+                ? Math.max(0, Math.min(1, itemCard.highYieldScore))
+                : 0.5;
+              const cardItem = {
+                deckId: deck.id,
+                front: item.front,
+                back: item.back,
+                tags: itemCard.tags?.join(",") || null,
+                cardType: isQuestion ? "mcq" : "basic",
+                choices: question?.choices ? JSON.stringify(question.choices) : null,
+                correctIndex: question?.correctIndex ?? null,
+                subject: itemCard.subject ?? null,
+                organSystem: itemCard.organSystem ?? null,
+                difficulty: validatedDifficulty,
+                highYieldScore: validatedHighYieldScore,
+                source: "heuristic",
+                aiGenerated: false,
+                createdAt: new Date(),
+                updatedAt: new Date(),
             };
             cardsToInsert.push(cardItem);
             send("card", {
@@ -447,28 +522,55 @@ generateRoutes.post("/generate/stream", async (c) => {
           }
         }
 
-        const createdCards = await insertBatched(getDb(c), cards, cardsToInsert);
+        // Send a keepalive ping so the Worker isn't seen as idle during batch DB insert
+        send("status", { message: "Saving cards..." });
+        
+        let dbInsertSucceeded = true;
+        let createdCards: any[] = [];
+        try {
+          createdCards = await insertBatched(getDb(c), cards, cardsToInsert);
+        } catch (dbErr) {
+          dbInsertSucceeded = false;
+          const errMsg = (dbErr as Error)?.message || String(dbErr);
+          logger.error({ err: errMsg, cardCount: cardsToInsert.length, deckId: deck.id }, "Database insert failed, cards already streamed to client");
+          await captureGenerationError(getDb(c), dbErr as Error, {
+            userId,
+            operation: "generate:stream:db-insert",
+            model: "unknown",
+            inputText: `deckId: ${deck.id}, cardCount: ${cardsToInsert.length}`,
+            extra: { error: errMsg },
+          });
+        }
+        
         const duration = Date.now() - startTime;
-        await logGeneration(
-          c,
-          userId,
-          deckType,
-          usedOfflineFallback ? "offline-fallback" : model,
-          true,
-          undefined,
-          duration
-        );
+        
+        try {
+          await logGeneration(
+            c,
+            userId,
+            deckType,
+            usedOfflineFallback ? "offline-fallback" : model,
+            true,
+            undefined,
+            duration
+          );
+        } catch {
+          /* best-effort logging */
+        }
 
+        // Send minimal complete payload — full cards were already streamed one-by-one via
+        // individual "card" events.  Sending the full DB rows here makes the SSE payload
+        // 50-100 KB which Cloudflare Workers may silently truncate, causing the frontend
+        // to never receive this event.
         send("complete", {
-          deck,
-          cards: createdCards,
+          deck: { id: deck.id, name: deck.name, kind: deck.kind },
           generationId: deck.id,
           duration,
           usedOfflineFallback,
-          partial: false,
+          partial: !dbInsertSucceeded,
           requestedCount,
-          generatedCount: createdCards.length,
-          message: "Cards generated. Use /explanations/generate/:deckId for study explanations.",
+          generatedCount: cardsToInsert.length,
+          message: dbInsertSucceeded ? "Cards generated successfully." : "Cards generated but failed to save to database. Please try again.",
         });
         closeWhenReady();
       } catch (err) {
