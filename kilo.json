@@ -1,14 +1,14 @@
 {
   "$schema": "https://app.kilo.ai/config.json",
-  "model": "lmstudio/qwen3-vl-4b",
+  "model": "lmstudio/qwen3.5-4b",
   "provider": {
     "lmstudio": {
       "models": {
-        "qwen3-vl-4b": {
-          "name": "Qwen3-VL-4B"
+        "qwen3.5-4b": {
+          "name": "Qwen3.5-4B"
         }
       }
     }
   },
-  "small_model": "lmstudio/qwen3-vl-4b"
+  "small_model": "lmstudio/qwen3.5-4b"
 }

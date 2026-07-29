@@ -49,19 +49,35 @@ export const createCardSchema = z.object({
   deckId: z.number().int().positive(),
   front: z.string().min(1).max(10000),
   back: z.string().min(1).max(10000),
-  cardType: z.enum(["basic", "mcq"]).optional(),
+  cardType: z.enum([
+    "basic", "mcq", "cloze", "vignette", "compare_contrast", "mnemonic",
+    "table", "flowchart", "algorithm", "image_occlusion", "label_id",
+    "histology", "radiology", "pharmacology", "pathology"
+  ]).optional(),
   tags: z.string().max(500).optional(),
   choices: z.string().max(5000).optional(),
   correctIndex: z.number().int().min(0).max(10).optional(),
+  subject: z.string().max(100).optional(),
+  organSystem: z.string().max(100).optional(),
+  difficulty: z.enum(["easy", "medium", "hard"]).optional(),
+  highYieldScore: z.number().min(0).max(1).optional(),
 });
 
 export const updateCardSchema = z.object({
   front: z.string().min(1).max(10000).optional(),
   back: z.string().min(1).max(10000).optional(),
   tags: z.string().max(500).optional(),
-  cardType: z.enum(["basic", "mcq"]).optional(),
+  cardType: z.enum([
+    "basic", "mcq", "cloze", "vignette", "compare_contrast", "mnemonic",
+    "table", "flowchart", "algorithm", "image_occlusion", "label_id",
+    "histology", "radiology", "pharmacology", "pathology"
+  ]).optional(),
   choices: z.string().max(5000).optional(),
   correctIndex: z.number().int().min(0).max(10).optional(),
+  subject: z.string().max(100).optional(),
+  organSystem: z.string().max(100).optional(),
+  difficulty: z.enum(["easy", "medium", "hard"]).optional(),
+  highYieldScore: z.number().min(0).max(1).optional(),
 });
 
 export const regenerateBatchSchema = z.object({
@@ -102,6 +118,7 @@ export const generateSchema = z.object({
   deckName: z.string().min(1).max(200),
   cardCount: z.number().int().positive().max(300).optional(),
   deckType: z.enum(["deck", "qbank"]).optional(),
+  parentId: z.number().int().positive().optional(),
 });
 
 export const explainSchema = z.object({

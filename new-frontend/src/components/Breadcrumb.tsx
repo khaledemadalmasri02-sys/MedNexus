@@ -20,24 +20,23 @@ export function Breadcrumb() {
     if (pathSegments.length === 0) return items;
 
     const firstSegment = pathSegments[0];
-    const routeLabels: Record<string, string> = {
-      library: "Library",
-      generate: "Generate",
-      study: "Study",
-      history: "History",
-      planner: "Planner",
-      settings: "Settings",
-      chat: "Study Buddy",
-      "smart-review": "Smart Review",
-      exam: "Exam",
-      summarize: "Summarize",
-      mnemonics: "Mnemonics",
-      coach: "Coach",
-      "image-analyze": "Image Analyzer",
-      "voice-study": "Voice Study",
-      "group-study": "Group Study",
-      studypilot: "StudyPilot",
-    };
+const routeLabels: Record<string, string> = {
+    library: "Library",
+    generate: "Generate",
+    study: "Study",
+    history: "History",
+    planner: "Planner",
+    settings: "Settings",
+    chat: "Study Buddy",
+    "smart-review": "Smart Review",
+    exam: "Exam",
+    summarize: "Summarize",
+    mnemonics: "Mnemonics",
+    coach: "Coach",
+    "image-analyze": "Image Analyzer",
+    "voice-study": "Voice Study",
+    "group-study": "Group Study",
+  };
 
     if (routeLabels[firstSegment]) {
       items.push({ label: routeLabels[firstSegment], path: `/${firstSegment}` });

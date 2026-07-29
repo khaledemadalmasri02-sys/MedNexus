@@ -10,7 +10,7 @@
 //   node scripts/seed-library.mjs --local    # apply to local D1
 //   node scripts/seed-library.mjs --remote   # apply to remote D1
 //
-// Requires wrangler + the D1 binding "mednexus-db" (see wrangler.toml).
+// Requires wrangler + the D1 binding "mednexus-db" (see wrangler.jsonc).
 
 import { writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";

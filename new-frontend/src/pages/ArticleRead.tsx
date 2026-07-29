@@ -31,7 +31,7 @@ function parseMeta(raw: string, topic: string): ArticleMeta {
   // Detect "Key Takeaway:" / "Takeaway:" indicator line in body.
   let takeawayLineIdx = -1;
   for (let i = bodyStart; i < lines.length; i++) {
-    const m = /^(key\s+takeaway|takeaway)\s*[:\-]?\s*(.+)$/i.exec(lines[i].trim());
+    const m = /^(key\s+takeaway|takeaway)\s*[:-]?\s*(.+)$/i.exec(lines[i].trim());
     if (m) {
       isTakeaway = true;
       takeawayText = m[2].trim();

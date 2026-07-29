@@ -43,7 +43,7 @@ notificationRoutes.get("/notifications", async (c) => {
 
     return c.json({ notifications: notifs, unreadCount: countResult?.count || 0 });
   } catch (err) {
-    logger.error({ err }, "Failed to get notifications");
+    logger.error({ err: (err as Error)?.message || err, stack: (err as Error)?.stack }, "Failed to get notifications");
     return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get notifications" } }, 500);
   }
 });

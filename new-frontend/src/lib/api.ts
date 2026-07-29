@@ -448,6 +448,7 @@ export function streamEvents(
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
+        Accept: "text/event-stream",
       };
       const csrfToken = getCsrfToken();
       if (csrfToken) {
@@ -520,6 +521,22 @@ export function streamEvents(
           }
         }
       }
+
+      // Flush any remaining buffer content after stream closes
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            onEvent(pendingEvent, data);
+          } catch {
+            onEvent(pendingEvent, trimmed.slice(6));
+          }
+        }
+      }
+
+      // Notify caller that the stream ended cleanly (allows recovery if complete was missed)
+      onEvent("stream_end", {});
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         onError?.(err as Error);
@@ -531,6 +548,7 @@ export function streamEvents(
 
   return () => controller.abort();
 }
+
 
 // ==================== API Methods ====================
 
@@ -707,14 +725,14 @@ export const cardsApi = {
 
 // Generate API
 export const generateApi = {
-  generate: (data: { text: string; deckName: string; cardCount?: number; deckType?: "deck" | "qbank" }) =>
+  generate: (data: { text: string; deckName: string; cardCount?: number; deckType?: "deck" | "qbank"; parentId?: number | null }) =>
     apiFetch<GenerateResponse>("/generate", {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
   stream: (
-    data: { text: string; deckName: string; cardCount?: number; deckType?: "deck" | "qbank" },
+    data: { text: string; deckName: string; cardCount?: number; deckType?: "deck" | "qbank"; parentId?: number | null },
     onEvent: (event: string, data: unknown) => void,
     onError?: (error: Error) => void
   ) => streamEvents("/generate/stream", data, onEvent, onError),
@@ -1915,6 +1933,41 @@ export interface VoiceCheckResult {
   score: number;
 }
 
+export interface SpeechToTextResponse {
+  text: string;
+  originalText: string;
+  confidence: number;
+  language: string;
+  corrected: boolean;
+}
+
+export interface VoiceTtsResult {
+  audio: string;
+  format: string;
+  duration: number;
+}
+
+export interface VoiceSessionResponse {
+  sessionId: string;
+  status: string;
+  instructions: string;
+}
+
+export interface VoiceProcessResponse {
+  response: string;
+  audio: string;
+  format: string;
+  conversation: Array<{ speaker: "student" | "patient"; text: string; timestamp: number }>;
+  emotion: string;
+}
+
+export interface VoiceConfiguration {
+  whisper: { model: string; language: string; sampleRate: number };
+  tts: { engine: string; voices: Array<{ id: string; name: string; language: string; gender: string | null; age: number | null }> };
+  vad: { silenceThreshold: number; silenceDurationMs: number; speechSensitivity: number };
+  streaming: { chunkSizeMs: number; maxDelayMs: number };
+}
+
 export interface GroupStudyRoom {
   id: string;
   hostUserId: string;
@@ -1930,7 +1983,7 @@ export interface GroupStudyRoom {
 export const agentsApi = {
   chat: async (message: string, deckId?: number, onChunk?: (chunk: string) => void, onDone?: () => void, onError?: (err: Error) => void) => {
     const url = `${API_BASE_URL}/agents/chat`;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = { "Content-Type": "application/json", "Accept": "text/event-stream" };
     const csrfToken = getCsrfToken();
     if (csrfToken) headers["x-csrf-token"] = csrfToken;
     const token = getAuthToken();
@@ -2050,6 +2103,34 @@ export const agentsApi = {
       method: "POST",
       body: JSON.stringify({ cardFront, cardBack, spokenAnswer }),
     }),
+  speechToText: (audioBase64: string) =>
+    apiFetch<SpeechToTextResponse>("/speech-to-text", {
+      method: "POST",
+      body: JSON.stringify({ audio: audioBase64 }),
+    }),
+  textToSpeech: (text: string, options?: { voice?: any; emotion?: string; speed?: number }) =>
+    apiFetch<VoiceTtsResult>("/text-to-speech", {
+      method: "POST",
+      body: JSON.stringify({ text, ...options }),
+    }),
+  createVoiceSession: (data: { attemptId: number; patientProfileId: number; stationInstructions: string }) =>
+    apiFetch<VoiceSessionResponse>("/voice-session", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  processVoiceInput: (sessionId: string, transcript: string, audio?: string) =>
+    apiFetch<VoiceProcessResponse>(`/voice-session/${sessionId}/process`, {
+      method: "POST",
+      body: JSON.stringify({ transcript, audio }),
+    }),
+  getVoiceSession: (sessionId: string) =>
+    apiFetch<{ sessionId: string; conversation: Array<{ speaker: string; text: string; timestamp: number }>; isSpeaking: boolean; lastActivity: number }>(`/voice-session/${sessionId}`),
+  endVoiceSession: (sessionId: string) =>
+    apiFetch<{ success: boolean; message: string }>(`/voice-session/${sessionId}`, { method: "DELETE" }),
+  interruptVoiceSession: (sessionId: string) =>
+    apiFetch<{ success: boolean; message: string }>(`/voice-session/${sessionId}/interrupt`, { method: "POST" }),
+  getVoiceConfig: () =>
+    apiFetch<VoiceConfiguration>("/voice-config"),
   createGroupRoom: (deckIds: number[]) =>
     apiFetch<{ room: GroupStudyRoom }>("/agents/group-study/create", {
       method: "POST",
@@ -2139,7 +2220,7 @@ export const supportApi = {
     onError?: (err: Error) => void
   ) => {
     const url = `${API_BASE_URL}/support/chat`;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "text/event-stream" };
     const csrfToken = getCsrfToken();
     if (csrfToken) headers["x-csrf-token"] = csrfToken;
     const token = getAuthToken();
@@ -2282,6 +2363,44 @@ export const userDataApi = {
     apiFetch<{ success: boolean }>(`/backup/${backupId}`, { method: "DELETE" }),
 };
 
+export const voiceApi = {
+  speechToText: (audioBase64: string) =>
+    apiFetch<SpeechToTextResponse>("/speech-to-text", {
+      method: "POST",
+      body: JSON.stringify({ audio: audioBase64 }),
+    }),
+
+  textToSpeech: (text: string, options?: { voice?: any; emotion?: string; speed?: number }) =>
+    apiFetch<VoiceTtsResult>("/text-to-speech", {
+      method: "POST",
+      body: JSON.stringify({ text, ...options }),
+    }),
+
+  createVoiceSession: (data: { attemptId: number; patientProfileId: number; stationInstructions: string }) =>
+    apiFetch<VoiceSessionResponse>("/voice-session", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  processVoiceInput: (sessionId: string, transcript: string, audio?: string) =>
+    apiFetch<VoiceProcessResponse>(`/voice-session/${sessionId}/process`, {
+      method: "POST",
+      body: JSON.stringify({ transcript, audio }),
+    }),
+
+  getVoiceSession: (sessionId: string) =>
+    apiFetch<{ sessionId: string; conversation: Array<{ speaker: string; text: string; timestamp: number }>; isSpeaking: boolean; lastActivity: number }>(`/voice-session/${sessionId}`),
+
+  endVoiceSession: (sessionId: string) =>
+    apiFetch<{ success: boolean; message: string }>(`/voice-session/${sessionId}`, { method: "DELETE" }),
+
+  interruptVoiceSession: (sessionId: string) =>
+    apiFetch<{ success: boolean; message: string }>(`/voice-session/${sessionId}/interrupt`, { method: "POST" }),
+
+  getVoiceConfig: () =>
+    apiFetch<VoiceConfiguration>("/voice-config"),
+};
+
 // Export all APIs
 export default {
   auth: authApi,
@@ -2310,6 +2429,7 @@ export default {
   agents: agentsApi,
   support: supportApi,
    userData: userDataApi,
+  voice: voiceApi,
 };
 
 function getAdminHeaders(): Record<string, string> {
@@ -2419,5 +2539,162 @@ export const adminApi = {
 
   deleteFeedback: (id: number) =>
     adminFetch<{ success: boolean }>(`/feedback/${id}`, { method: "DELETE" }),
+};
+
+export interface OsceStation {
+  id: number;
+  title: string;
+  specialty: { name: string };
+  difficulty: "easy" | "medium" | "hard";
+  timeLimitMinutes: number;
+  stationType: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OsceExam {
+  id: number;
+  userId: string;
+  title: string;
+  description?: string;
+  stationIds: number[];
+  totalTimeMinutes: number;
+  isMock: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OsceAttempt {
+  id: number;
+  userId: string;
+  examId: number;
+  stationId: number;
+  patientProfileId: number;
+  startedAt: string;
+  completedAt?: string;
+  durationSeconds?: number;
+  conversationLog: string;
+  score?: number;
+  scoresByCategory: string;
+  feedback: string;
+  strengths: string;
+  weaknesses: string;
+  improvementPlan: string;
+  examinerNotes: string;
+  isCompleted: boolean;
+  createdAt: string;
+  updatedAt: string;
+  station?: OsceStation;
+  patientProfile?: {
+    id: number;
+    name: string;
+    age: number;
+    gender: string;
+    personality: string;
+    communicationStyle: string;
+  };
+}
+
+export interface OsceProgress {
+  id: number;
+  userId: string;
+  stationId: number;
+  station: OsceStation;
+  attemptsCount: number;
+  bestScore?: number;
+  averageScore?: number;
+  lastAttemptAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OsceSettings {
+  id: number;
+  userId: string;
+  voiceEnabled: boolean;
+  autoSubmitEnabled: boolean;
+  showHints: boolean;
+  difficultyFilter: string;
+  preferredStationTypes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const osceApi = {
+  listExams: () => apiFetch<OsceExam[]>("/osce/exams"),
+
+  getExam: (id: number) => apiFetch<OsceExam>(`/osce/exams/${id}`),
+
+  createExam: (data: { title: string; description?: string; stationIds: number[]; totalTimeMinutes?: number; isMock?: boolean }) =>
+    apiFetch<OsceExam>("/osce/exams", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateExam: (id: number, data: Partial<{ title: string; description: string; stationIds: number[]; totalTimeMinutes: number; isMock: boolean }>) =>
+    apiFetch<OsceExam>(`/osce/exams/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteExam: (id: number) =>
+    apiFetch<{ success: boolean }>(`/osce/exams/${id}`, { method: "DELETE" }),
+
+  listStations: (filters?: { difficulty?: string; stationType?: string; isActive?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (filters?.difficulty) qs.set("difficulty", filters.difficulty);
+    if (filters?.stationType) qs.set("stationType", filters.stationType);
+    if (filters?.isActive !== undefined) qs.set("isActive", String(filters.isActive));
+    return apiFetch<OsceStation[]>(`/osce/stations${qs.toString() ? `?${qs.toString()}` : ""}`);
+  },
+
+  getStation: (id: number) => apiFetch<OsceStation>(`/osce/stations/${id}`),
+
+  createStation: (data: { title: string; specialtyId: number; difficulty?: string; timeLimitMinutes?: number; candidateInstructions: string; patientInstructions: string; stationType?: string; hiddenDiagnosis?: string }) =>
+    apiFetch<OsceStation>("/osce/stations", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateStation: (id: number, data: Partial<{ title: string; difficulty: string; timeLimitMinutes: number; isActive: boolean }>) =>
+    apiFetch<OsceStation>(`/osce/stations/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteStation: (id: number) =>
+    apiFetch<{ success: boolean }>(`/osce/stations/${id}`, { method: "DELETE" }),
+
+  startAttempt: (data: { examId: number; stationId: number }) =>
+    apiFetch<OsceAttempt>("/osce/attempts/start", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  completeAttempt: (data: { attemptId: number; durationSeconds: number; conversationLog: string; scoresByCategory: string; feedback: string; strengths: string; weaknesses: string; improvementPlan: string; examinerNotes?: string }) =>
+    apiFetch<OsceAttempt>("/osce/attempts/complete", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getAttempt: (id: number) => apiFetch<OsceAttempt>(`/osce/attempts/${id}`),
+
+  getProgress: () => apiFetch<OsceProgress[]>("/osce/progress"),
+
+  getSettings: () => apiFetch<OsceSettings>("/osce/settings"),
+
+  updateSettings: (data: Partial<{ voiceEnabled: boolean; autoSubmitEnabled: boolean; showHints: boolean; difficultyFilter: string; preferredStationTypes: string[] }>) =>
+    apiFetch<OsceSettings>("/osce/settings", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  getPatientResponse: (attemptId: number, question: string) =>
+    apiFetch<{ response: string; suggestions?: string[] }>("/osce/patient-response", {
+      method: "POST",
+      body: JSON.stringify({ attemptId, question }),
+    }),
 };
 

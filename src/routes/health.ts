@@ -76,11 +76,12 @@ const tunnelTest = async (c: any) => {
     const rModels = await fetch(`${url}/models`, { method: "GET" });
     const modelsBody = await rModels.text();
     // Now test a real chat completion (non-streaming) to catch model/timeout errors.
+    const modelForRequest = cfg.AI_TEXT_MODEL?.replace(/^(local|lmstudio|ollama)\//, "") || "qwen3.5-4b";
     const rChat = await fetch(`${url}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: cfg.AI_TEXT_MODEL || "local/qwen/qwen3-4b-2507",
+        model: modelForRequest,
         messages: [{ role: "user", content: "Say hi in 5 words" }],
         max_tokens: 32,
         stream: false,

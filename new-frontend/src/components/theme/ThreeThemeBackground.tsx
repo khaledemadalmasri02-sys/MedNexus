@@ -18,7 +18,7 @@ const WebGLBudgetContext = createContext<{ hasHeavyWebGLRoute: boolean }>({ hasH
 
 export function WebGLBudgetProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
-  const heavyRoutes = ["/game"];
+  const heavyRoutes: string[] = [];
   const hasHeavyWebGLRoute = heavyRoutes.some((r) => location.pathname.startsWith(r));
   return (
     <WebGLBudgetContext.Provider value={{ hasHeavyWebGLRoute }}>

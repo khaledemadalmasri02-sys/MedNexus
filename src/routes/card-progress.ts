@@ -252,7 +252,13 @@ cardProgressRoutes.get("/review/due-count", async (c) => {
     const userId = getUserId(c);
     const today = new Date().toISOString().split("T")[0];
 
-    const dueRecords = await getDb(c).query.cardProgress.findMany({
+    const db = getDb(c);
+    if (!db) {
+      logger.error({ err: new Error("Database not initialized") }, "Failed to get due count");
+      return c.json({ error: { code: "INTERNAL_ERROR", message: "Database not initialized" } }, 500);
+    }
+
+    const dueRecords = await db.query.cardProgress.findMany({
       where: and(
         lte(cardProgress.nextReviewDate, today),
         ownerFilter(userId),
@@ -260,8 +266,8 @@ cardProgressRoutes.get("/review/due-count", async (c) => {
     });
 
     return c.json({ count: dueRecords.length });
-  } catch (err) {
-    logger.error({ err }, "Failed to get due count");
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err), stack: err?.stack, userId: getUserId(c) }, "Failed to get due count");
     return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to get due count" } }, 500);
   }
 });

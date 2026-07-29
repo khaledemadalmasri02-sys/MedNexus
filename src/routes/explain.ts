@@ -106,6 +106,11 @@ explainRoutes.post("/explain/full", validate(fullExplainSchema), async (c) => {
 
 // ── POST /api/explain/stream (SSE) ──
 explainRoutes.post("/explain/stream", async (c) => {
+  const accept = c.req.header("accept") || "";
+  if (!accept.includes("text/event-stream")) {
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Client must accept text/event-stream" } }, 406);
+  }
+
   const body = await readJson(c);
   const { front, back, mode = "full" } = body as any;
 

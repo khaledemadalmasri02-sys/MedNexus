@@ -1,0 +1,31 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package*.json ./
+COPY tsconfig*.json ./
+RUN npm ci
+
+COPY src/ ./src/
+COPY .wrangler/ ./.wrangler/
+
+RUN npx tsc --noEmit
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+RUN npm install -g wrangler
+
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/tsconfig*.json ./
+COPY --from=builder /app/.wrangler ./.wrangler/
+COPY --from=builder /app/src ./src
+
+RUN npm ci --omit=dev
+
+EXPOSE 8787
+
+CMD ["npx", "wrangler", "dev", "--port", "8787", "--host", "0.0.0.0"]

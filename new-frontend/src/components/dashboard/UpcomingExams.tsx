@@ -135,7 +135,7 @@ export function UpcomingExams() {
                     transition={{ duration: 0.8, delay: i * 0.1 }}
                   />
                 </div>
-                <Link to="/smart-review">
+                <Link to="/chat">
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
@@ -143,7 +143,7 @@ export function UpcomingExams() {
                     style={{ background: `${color}15`, color }}
                   >
                     <Play className="h-3 w-3" />
-                    Prep
+                    Start
                   </motion.button>
                 </Link>
               </div>

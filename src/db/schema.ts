@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
 // Users table
@@ -65,6 +65,10 @@ export const cards = sqliteTable("cards", {
   aiExplanation: text("ai_explanation"),
   aiGenerated: integer("ai_generated", { mode: "boolean" }).notNull().default(false),
   source: text("source").notNull().default("heuristic"),
+  subject: text("subject"),
+  organSystem: text("organ_system"),
+  difficulty: text("difficulty"),
+  highYieldScore: real("high_yield_score").default(0.5),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
@@ -203,10 +207,26 @@ export const errorLogs = sqliteTable("error_logs", {
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type Session = typeof sessions.$inferSelect;
+export type NewSession = typeof sessions.$inferInsert;
 export type Deck = typeof decks.$inferSelect;
 export type NewDeck = typeof decks.$inferInsert;
 export type Card = typeof cards.$inferSelect;
 export type NewCard = typeof cards.$inferInsert;
+export type QBank = typeof qbanks.$inferSelect;
+export type NewQBank = typeof qbanks.$inferInsert;
+export type Question = typeof questions.$inferSelect;
+export type NewQuestion = typeof questions.$inferInsert;
+export type MindMap = typeof mindMaps.$inferSelect;
+export type NewMindMap = typeof mindMaps.$inferInsert;
+export type Topic = typeof topics.$inferSelect;
+export type NewTopic = typeof topics.$inferInsert;
+export type Feedback = typeof feedback.$inferSelect;
+export type NewFeedback = typeof feedback.$inferInsert;
+export type GenerationLog = typeof generationLogs.$inferSelect;
+export type NewGenerationLog = typeof generationLogs.$inferInsert;
+export type FreeTierUsage = typeof freeTierUsage.$inferSelect;
+export type NewFreeTierUsage = typeof freeTierUsage.$inferInsert;
 
 // Study Plans table
 export const studyPlans = sqliteTable("study_plans", {
@@ -316,7 +336,7 @@ export type NewNotification = typeof notifications.$inferInsert;
 export const cardProgress = sqliteTable("card_progress", {
   cardId: integer("card_id").notNull().references(() => cards.id, { onDelete: "cascade" }).primaryKey(),
   userId: text("user_id").references(() => users.id),
-  easeFactor: integer("ease_factor", { mode: "number" }).notNull().default(2.5),
+  easeFactor: real("ease_factor").notNull().default(2.5),
   intervalDays: integer("interval_days").notNull().default(0),
   repetitions: integer("repetitions").notNull().default(0),
   nextReviewDate: text("next_review_date").notNull().default(sql`(date('now'))`), // app sets value; SQL function default
@@ -354,6 +374,10 @@ export const qbankTags = sqliteTable("qbank_tags", {
 
 export type Tag = typeof tags.$inferSelect;
 export type NewTag = typeof tags.$inferInsert;
+export type DeckTag = typeof deckTags.$inferSelect;
+export type NewDeckTag = typeof deckTags.$inferInsert;
+export type QBankTag = typeof qbankTags.$inferSelect;
+export type NewQBankTag = typeof qbankTags.$inferInsert;
 
 export const achievements = sqliteTable("achievements", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -595,8 +619,8 @@ export const articleJobs = sqliteTable("article_jobs", {
   outline: text("outline"),
   contentMarkdown: text("content_markdown"),
   error: text("error"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
 export type ArticleJob = typeof articleJobs.$inferSelect;
@@ -688,3 +712,69 @@ export type LibraryDeck = typeof libraryDecks.$inferSelect;
 export type NewLibraryDeck = typeof libraryDecks.$inferInsert;
 export type LibraryCard = typeof libraryCards.$inferSelect;
 export type NewLibraryCard = typeof libraryCards.$inferInsert;
+
+export const knowledgeGraphNodes = sqliteTable("knowledge_graph_nodes", {
+  id: text("id").primaryKey(),
+  type: text("type").notNull(),
+  name: text("name").notNull(),
+  content: text("content"),
+  metadata: text("metadata"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type KnowledgeGraphNode = typeof knowledgeGraphNodes.$inferSelect;
+export type NewKnowledgeGraphNode = typeof knowledgeGraphNodes.$inferInsert;
+
+export const knowledgeGraphEdges = sqliteTable("knowledge_graph_edges", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sourceId: text("source_id").notNull().references(() => knowledgeGraphNodes.id),
+  targetId: text("target_id").notNull().references(() => knowledgeGraphNodes.id),
+  relationshipType: text("relationship_type").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type KnowledgeGraphEdge = typeof knowledgeGraphEdges.$inferSelect;
+export type NewKnowledgeGraphEdge = typeof knowledgeGraphEdges.$inferInsert;
+
+export const cardMetadata = sqliteTable("card_metadata", {
+  cardId: integer("card_id").notNull().references(() => cards.id, { onDelete: "cascade" }).primaryKey(),
+  subject: text("subject"),
+  organSystem: text("organ_system"),
+  difficulty: text("difficulty"),
+  highYieldScore: real("high_yield_score").default(0.5),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type CardMetadata = typeof cardMetadata.$inferSelect;
+export type NewCardMetadata = typeof cardMetadata.$inferInsert;
+
+export const explanationCache = sqliteTable("explanation_cache", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  cardId: integer("card_id").notNull().references(() => cards.id, { onDelete: "cascade" }),
+  explanationType: text("explanation_type").notNull(),
+  content: text("content").notNull(),
+  hash: text("hash").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type ExplanationCache = typeof explanationCache.$inferSelect;
+export type NewExplanationCache = typeof explanationCache.$inferInsert;
+
+export const batchJobs = sqliteTable("batch_jobs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").references(() => users.id),
+  type: text("type").notNull(),
+  status: text("status").notNull().default("pending"),
+  progress: integer("progress").notNull().default(0),
+  totalItems: integer("total_items").notNull().default(0),
+  completedItems: integer("completed_items").notNull().default(0),
+  result: text("result"),
+  error: text("error"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export type BatchJob = typeof batchJobs.$inferSelect;
+export type NewBatchJob = typeof batchJobs.$inferInsert;

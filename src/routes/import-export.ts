@@ -61,7 +61,7 @@ importExportRoutes.post("/decks/:id/import", validate(importCardsSchema), async 
 
     const now = new Date();
     const inserted = await db.insert(cards).values(
-      cardsToInsert.map((c: { front: string; back: string; cardType?: string; tags?: string; choices?: string; correctIndex?: number }) => ({
+      cardsToInsert.map((c: { front: string; back: string; cardType?: string; tags?: string; choices?: string; correctIndex?: number; subject?: string; organSystem?: string; difficulty?: string; highYieldScore?: number }) => ({
         deckId,
         front: c.front,
         back: c.back,
@@ -69,6 +69,10 @@ importExportRoutes.post("/decks/:id/import", validate(importCardsSchema), async 
         tags: c.tags || null,
         choices: c.choices || null,
         correctIndex: c.correctIndex ?? null,
+        subject: c.subject ?? null,
+        organSystem: c.organSystem ?? null,
+        difficulty: c.difficulty ?? null,
+        highYieldScore: c.highYieldScore ?? 0.5,
         createdAt: now,
         updatedAt: now,
       }))

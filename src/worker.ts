@@ -1,9 +1,8 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./types";
-import { createDb } from "./db/index";
+import { createDb, createFlashcardDb, createStudyPilotDb, createOsceDb } from "./db/index";
 import { SESSION_COOKIE, getSession, readCookie } from "./lib/auth";
 
-// Route modules
 import { authRoutes } from "./routes/auth";
 import { deckRoutes } from "./routes/decks";
 import { cardRoutes } from "./routes/cards";
@@ -40,16 +39,26 @@ import { adminRoutes } from "./routes/admin";
 import { supportRoutes } from "./routes/support";
 import { agentRoutes } from "./routes/agents";
 import { studypilotRoutes } from "./routes/studypilot";
+import { voiceRoutes } from "./routes/voice";
+import { wsRoutes } from "./routes/ws";
 
 const app = new Hono<AppEnv>();
 
-// Attach the D1-backed drizzle instance to every request.
 app.use("*", async (c, next) => {
-  c.set("db", createDb(c.env.DB));
+  const requestId = crypto.randomUUID();
+  c.set("requestId", requestId);
   await next();
 });
 
-// Session auth middleware — loads the user from the session cookie (if any).
+app.use("*", async (c, next) => {
+  const db = c.env.LOCAL_DB || c.env.DB;
+  c.set("db", createDb(db as any));
+  c.set("flashcardDb", createFlashcardDb(db as any));
+  c.set("studypilotDb", createStudyPilotDb(db as any));
+  c.set("osceDb", createOsceDb(db as any));
+  await next();
+});
+
 app.use("*", async (c, next) => {
   const sessionId = readCookie(c, SESSION_COOKIE);
   if (sessionId) {
@@ -63,7 +72,6 @@ app.use("*", async (c, next) => {
   await next();
 });
 
-// Admin key gate — MUST be registered before the admin routes below.
 app.use("/api/admin/*", async (c, next) => {
   const adminKey = c.req.header("x-admin-key");
   const secret = c.env.ADMIN_SECRET_KEY;
@@ -73,10 +81,15 @@ app.use("/api/admin/*", async (c, next) => {
   await next();
 });
 
-// Health is mounted at root (e.g. GET /health, /healthz).
+app.use("/api/*", async (c, next) => {
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("X-Frame-Options", "DENY");
+  c.header("X-XSS-Protection", "1; mode=block");
+  await next();
+});
+
 app.route("/", healthRoutes);
 
-// All API routers are mounted under /api (paths inside already include their sub-prefix).
 const apiRouters = [
   authRoutes, deckRoutes, cardRoutes,
   plannerRoutes, studySessionRoutes, plannerTemplateRoutes, notificationRoutes,
@@ -85,15 +98,13 @@ const apiRouters = [
   generationRoutes, explanationRoutes, qbankRoutes, importExportRoutes, errorRoutes,
   generateRoutes, explainRoutes, aiAnalysisRoutes, extractRoutes, offlineRoutes,
   summaryRoutes, uploadRoutes, terminalRoutes, backupRoutes, downloadRoutes, articleJobRoutes,
-  generationJobRoutes,
-  adminRoutes, supportRoutes, agentRoutes, studypilotRoutes,
+  generationJobRoutes, adminRoutes, supportRoutes, agentRoutes, studypilotRoutes, voiceRoutes,
+  wsRoutes,
 ];
 for (const r of apiRouters) app.route("/api", r);
 
-// 404 for unknown /api routes
 app.all("/api/*", (c) => c.json({ error: { code: "NOT_FOUND", message: "Endpoint not found" } }, 404));
 
-// Serve the built SPA for all other (non-API) routes via Workers Assets.
 app.all("*", async (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default {

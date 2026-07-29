@@ -16,8 +16,6 @@ export type AppConfig = {
   AI_QBANK_MODEL: string;
   AI_EXPLAIN_MODEL: string;
   STUDY_BUDDY_MODEL?: string;
-  // Max wall-clock ms for a single local/self-hosted AI request. 0 = no timeout
-  // (let the model run as long as it needs). Defaults to 0.
   LOCAL_AI_TIMEOUT_MS: number;
   FREE_MAX_DECKS: number;
   FREE_MAX_CARDS_PER_DECK: number;

@@ -1,0 +1,585 @@
+import type { StationRubric } from "./osce-scoring-engine";
+
+export const DEFAULT_WEIGHTS = {
+  communication: 20,
+  history: 30,
+  clinicalReasoning: 20,
+  management: 20,
+  professionalism: 10,
+};
+
+export const BREAKING_BAD_NEWS_WEIGHTS = {
+  communication: 40,
+  empathy: 30,
+  informationDelivery: 20,
+  professionalism: 10,
+};
+
+export const DEFAULT_STATION_TEMPLATES: Record<string, StationRubric> = {
+  "chest-pain-history": {
+    stationId: "chest-pain-history",
+    title: "Chest Pain History Taking",
+    weights: {
+      communication: 20,
+      history: 30,
+      clinicalReasoning: 20,
+      management: 20,
+      professionalism: 10,
+    },
+    checklistItems: [
+      {
+        id: "chest-intro-1",
+        name: "Introduced self and confirmed identity",
+        points: 4,
+        category: "Communication",
+        keywords: ["hello", "name", "dr", "doctor", "patient name", "confirm"],
+      },
+      {
+        id: "chest-onset",
+        name: "Asked about onset of chest pain",
+        points: 2,
+        category: "History",
+        keywords: ["when", "started", "onset", "first time", "ago"],
+      },
+      {
+        id: "chest-character",
+        name: "Asked about character of pain",
+        points: 2,
+        category: "History",
+        keywords: ["sharp", "dull", "pressure", "tight", "cramping", "burning", "aching"],
+      },
+      {
+        id: "chest-radiation",
+        name: "Asked about radiation of pain",
+        points: 2,
+        category: "History",
+        keywords: ["radiate", "spread", "to arm", "to back", "to jaw", "to neck"],
+      },
+      {
+        id: "chest-duration",
+        name: "Asked about duration of pain",
+        points: 2,
+        category: "History",
+        keywords: ["duration", "long", "how long", "minutes", "hours", "days"],
+      },
+      {
+        id: "chest-severity",
+        name: "Asked about severity of pain",
+        points: 2,
+        category: "History",
+        keywords: ["severity", "scale", "1 to 10", "mild", "severe", "worst"],
+      },
+      {
+        id: "chest-associated",
+        name: "Asked about associated symptoms",
+        points: 3,
+        category: "History",
+        keywords: ["shortness", "breathless", "nausea", "sweating", "dizzy", "palpitations", "fainting"],
+      },
+      {
+        id: "chest-risks",
+        name: "Assessed cardiovascular risk factors",
+        points: 5,
+        category: "History",
+        keywords: ["smoke", "tobacco", "diabetes", "hypertension", "cholesterol", "family history", "exercise"],
+      },
+      {
+        id: "chest-differential",
+        name: "Generated differential diagnosis",
+        points: 5,
+        category: "Clinical Reasoning",
+        keywords: ["differential", "diagnosis", "possible", "suspect", "ACS", "PE", "dissection"],
+      },
+      {
+        id: "chest-redflags",
+        name: "Recognized red flag symptoms",
+        points: 5,
+        category: "Clinical Reasoning",
+        keywords: ["sweating", "radiation", "severe", "worsening", "emergency", "urgent"],
+      },
+      {
+        id: "chest-investigations",
+        name: "Ordered appropriate investigations",
+        points: 5,
+        category: "Management",
+        keywords: ["ecg", "troponin", "chest x-ray", "oxygen", "blood tests"],
+      },
+      {
+        id: "chest-management",
+        name: "Appropriate immediate management",
+        points: 5,
+        category: "Management",
+        keywords: ["aspirin", "nitrate", "oxygen", "monitor", "admit", "refer"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not recognize emergency",
+      "Does not arrange urgent ECG",
+      "Advises unsafe discharge",
+    ],
+    criticalSafetyPatterns: [
+      "send home",
+      "not serious",
+      "no need for tests",
+      "discharge",
+    ],
+    expectedDiagnoses: ["Acute coronary syndrome", "Pulmonary embolism", "Aortic dissection", "Pneumothorax"],
+    expectedInvestigations: ["ECG", "Troponin", "Chest X-ray", "Oxygen saturation"],
+  },
+
+  "anaphylaxis": {
+    stationId: "anaphylaxis",
+    title: "Anaphylaxis Management",
+    weights: {
+      communication: 15,
+      history: 15,
+      clinicalReasoning: 20,
+      management: 30,
+      professionalism: 20,
+    },
+    checklistItems: [
+      {
+        id: "ana-intro",
+        name: "Recognized anaphylaxis presentation",
+        points: 5,
+        category: "History",
+        keywords: ["swelling", "hives", "itchy", "wheezing", "difficulty breathing", "anaphylaxis", "allergic reaction"],
+      },
+      {
+        id: "ana-recall",
+        name: "Recalled onset and triggers",
+        points: 3,
+        category: "History",
+        keywords: ["after", "eating", "exposure", "medication", "insect", "trigger", "ago"],
+      },
+      {
+        id: "ana-adrenaline",
+        name: "Administered adrenaline immediately",
+        points: 10,
+        category: "Management",
+        keywords: ["adrenaline", "epinephrine", "adrenaline auto-injector", "epipen", "inject", "immediately"],
+      },
+      {
+        id: "ana-call-help",
+        name: "Called for emergency assistance",
+        points: 5,
+        category: "Management",
+        keywords: ["ambulance", "call", "help", "emergency", "911", "999"],
+      },
+      {
+        id: "ana-position",
+        name: "Positioned patient appropriately",
+        points: 3,
+        category: "Management",
+        keywords: ["position", "sitting", "upright", "comfort", "laying"],
+      },
+      {
+        id: "ana-supplementary",
+        name: "Provided supplementary treatments",
+        points: 4,
+        category: "Management",
+        keywords: ["antihistamine", "corticosteroid", "oxygen", "airway", "iv"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not give adrenaline",
+      "Delays adrenaline administration",
+      "Does not recognize severity",
+    ],
+    criticalSafetyPatterns: [
+      "wait and see",
+      "antihistamine only",
+      "not serious",
+      "can go home",
+    ],
+    expectedDiagnoses: ["Anaphylaxis"],
+  },
+
+  "suicide-assessment": {
+    stationId: "suicide-assessment",
+    title: "Suicide Risk Assessment",
+    weights: {
+      communication: 25,
+      empathy: 25,
+      clinicalReasoning: 20,
+      management: 20,
+      professionalism: 10,
+    },
+    checklistItems: [
+      {
+        id: "suicide-intro",
+        name: "Established rapport and safety",
+        points: 5,
+        category: "Communication",
+        keywords: ["hello", "safe", "confidential", "private", "alone"],
+      },
+      {
+        id: "suicide-opioids",
+        name: "Assessed for suicidal ideation",
+        points: 8,
+        category: "Clinical Reasoning",
+        keywords: ["suicide", "kill", "hurt", "end it", "want to die", "thoughts"],
+      },
+      {
+        id: "suicide-plan",
+        name: "Assessed for plan and intent",
+        points: 8,
+        category: "Clinical Reasoning",
+        keywords: ["plan", "method", "how", "when", "intent", "serious"],
+      },
+      {
+        id: "suicide-means",
+        name: "Assessed for access to means",
+        points: 5,
+        category: "Clinical Reasoning",
+        keywords: ["medicine", "guns", "knife", "poison", "access", "have at home"],
+      },
+      {
+        id: "suicide-immediate-safety",
+        name: "Ensured immediate safety",
+        points: 10,
+        category: "Management",
+        keywords: ["hospital", "admit", "safety", "remove", "supervise", "emergency"],
+      },
+      {
+        id: "suicide-followup",
+        name: "Arranged follow-up care",
+        points: 5,
+        category: "Management",
+        keywords: ["follow up", "referral", "counseling", "psychiatry", "next appointment"],
+      },
+      {
+        id: "suicide-empathy",
+        name: "Demonstrated empathy and support",
+        points: 5,
+        category: "Empathy",
+        keywords: ["understand", "support", "help", "not alone", "together"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not assess immediate safety",
+      "Dismisses suicidal thoughts",
+      "Does not arrange safety planning",
+    ],
+    criticalSafetyPatterns: [
+      "not suicide",
+      "just go home",
+      "no need for help",
+    ],
+    expectedDiagnoses: ["Suicidal ideation with/without plan"],
+  },
+
+  "breaking-bad-news": {
+    stationId: "breaking-bad-news",
+    title: "Breaking Bad News",
+    weights: BREAKING_BAD_NEWS_WEIGHTS,
+    checklistItems: [
+      {
+        id: "bn-privacy",
+        name: "Established privacy",
+        points: 3,
+        category: "Communication",
+        keywords: ["private", "alone", "confidential", "just us"],
+      },
+      {
+        id: "bn-permission",
+        name: "Asked permission to deliver news",
+        points: 3,
+        category: "Communication",
+        keywords: ["okay", "fine", "yes", "can i", "is it okay"],
+      },
+      {
+        id: "bn-empathy",
+        name: "Used empathetic language",
+        points: 4,
+        category: "Empathy",
+        keywords: ["understand", "worry", "concerned", "i know this", "support"],
+      },
+      {
+        id: "bn-information",
+        name: "Provided clear information",
+        points: 4,
+        category: "Information Delivery",
+        keywords: ["diagnosis", "condition", "treatment", "options", "plan"],
+      },
+      {
+        id: "bn-response",
+        name: "Allowed patient response",
+        points: 3,
+        category: "Communication",
+        keywords: ["how do you feel", "what do you think", "any questions"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not allow patient response",
+      "Provides no information",
+      "Uses insensitive language",
+    ],
+    criticalSafetyPatterns: [
+      "shut up",
+      "stop asking",
+    ],
+  },
+
+  "diabetes-counseling": {
+    stationId: "diabetes-counseling",
+    title: "Diabetes Counseling",
+    weights: {
+      communication: 40,
+      education: 30,
+      management: 20,
+      empathy: 10,
+    },
+    checklistItems: [
+      {
+        id: "dm-intro",
+        name: "Introduced self and role",
+        points: 5,
+        category: "Communication",
+        keywords: ["hello", "name", "dr", "doctor", "counselor"],
+      },
+      {
+        id: "dm-rapport",
+        name: "Established rapport",
+        points: 5,
+        category: "Communication",
+        keywords: ["how are you", "how long", "understand", "support"],
+      },
+      {
+        id: "dm-med-history",
+        name: "Assessed medication history",
+        points: 5,
+        category: "Education",
+        keywords: ["medication", "pill", "injection", "insulin", "metformin"],
+      },
+      {
+        id: "dm-diet",
+        name: "Discussed dietary management",
+        points: 5,
+        category: "Education",
+        keywords: ["diet", "food", "carb", "sugar", "meal", "eating"],
+      },
+      {
+        id: "dm-exercise",
+        name: "Discussed exercise plan",
+        points: 5,
+        category: "Education",
+        keywords: ["exercise", "activity", "walk", "work out", "physical"],
+      },
+      {
+        id: "dm-monitoring",
+        name: "Discussed glucose monitoring",
+        points: 5,
+        category: "Education",
+        keywords: ["monitor", "check", "blood sugar", "glucose", "meter"],
+      },
+      {
+        id: "dm-followup",
+        name: "Arranged follow-up",
+        points: 5,
+        category: "Management",
+        keywords: ["follow up", "appointment", "referral", "next visit"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not provide education",
+      "No follow-up arranged",
+    ],
+  },
+
+  "abdominal-pain": {
+    stationId: "abdominal-pain",
+    title: "Abdominal Pain Assessment",
+    weights: DEFAULT_WEIGHTS,
+    checklistItems: [
+      {
+        id: "abdom-intro",
+        name: "Took proper history",
+        points: 5,
+        category: "History",
+        keywords: ["when", "started", "character", "pain", "location", "radiation"],
+      },
+      {
+        id: "abdom-onset",
+        name: "Identified onset and duration",
+        points: 3,
+        category: "History",
+        keywords: ["when", "started", "ago", "duration", "hours", "days"],
+      },
+      {
+        id: "abdom-character",
+        name: "Characterized abdominal pain",
+        points: 3,
+        category: "History",
+        keywords: ["sharp", "dull", "cramping", "burning", "visceral", "somatic"],
+      },
+      {
+        id: "abdom-location",
+        name: "Localised pain location",
+        points: 3,
+        category: "History",
+        keywords: ["upper", "lower", "abdomen", "tummy", "belly", "region"],
+      },
+      {
+        id: "abdom-associated",
+        name: "Asked about associated symptoms",
+        points: 4,
+        category: "History",
+        keywords: ["nausea", "vomit", "bowel", "urinary", "fever", "weight loss"],
+      },
+      {
+        id: "abdom-redflags",
+        name: "Identified red flags",
+        points: 5,
+        category: "Clinical Reasoning",
+        keywords: ["fever", "jaundice", "bleeding", "severe", "sudden", "emergency"],
+      },
+      {
+        id: "abdom-investigations",
+        name: "Ordered appropriate investigations",
+        points: 5,
+        category: "Management",
+        keywords: ["blood tests", "urine", "scan", "ultrasound", "x-ray", "ct"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not consider red flags",
+      "Misses serious pathology",
+    ],
+},
+  
+  "headache": {
+    stationId: "headache",
+    title: "Headache Assessment",
+    weights: DEFAULT_WEIGHTS,
+    checklistItems: [
+      {
+        id: "head-intro",
+        name: "Took thorough history",
+        points: 5,
+        category: "History",
+        keywords: ["when", "started", "character", "pain", "location", "severity"],
+      },
+      {
+        id: "head-onset",
+        name: "Identified onset and pattern",
+        points: 3,
+        category: "History",
+        keywords: ["when", "started", "pattern", "daily", "weekly", "constant", "intermittent"],
+      },
+      {
+        id: "head-character",
+        name: "Described headache character",
+        points: 3,
+        category: "History",
+        keywords: ["throbbing", "pulsating", "pressure", "sharp", "stabbing", "migraine", "tension"],
+      },
+      {
+        id: "head-location",
+        name: "Located headache",
+        points: 3,
+        category: "History",
+        keywords: ["front", "back", "side", "behind", "eyes", "temple", "occipital"],
+      },
+      {
+        id: "head-aggravating",
+        name: "Identified aggravating/alleviating factors",
+        points: 3,
+        category: "History",
+        keywords: ["worse", "better", "light", "noise", "sleep", "position", "stress"],
+      },
+      {
+        id: "head-associated",
+        name: "Asked about associated symptoms",
+        points: 4,
+        category: "History",
+        keywords: ["nausea", "vomit", "visual", "symptom", "neurological", "weakness", "dizzy"],
+      },
+      {
+        id: "head-redflags",
+        name: "Identified red flag symptoms",
+        points: 5,
+        category: "Clinical Reasoning",
+        keywords: ["sudden", "worst", "vision", "weakness", "numbness", "fever", "head injury"],
+      },
+      {
+        id: "head-investigations",
+        name: "Ordered appropriate investigations",
+        points: 5,
+        category: "Management",
+        keywords: ["ct", "mri", "blood tests", "lumbar puncture", "ecg"],
+      },
+    ],
+    automaticFailConditions: [
+      "Misses red flags (e.g., sudden onset, neurological symptoms)",
+      "Does not consider serious pathology",
+    ],
+  },
+
+  "asthma-review": {
+    stationId: "asthma-review",
+    title: "Asthma Review",
+    weights: {
+      communication: 30,
+      examination: 20,
+      management: 30,
+      professionalism: 20,
+    },
+    checklistItems: [
+      {
+        id: "asthma-intro",
+        name: "Reviewed current medications",
+        points: 5,
+        category: "Management",
+        keywords: ["inhaler", "preventer", "reliever", "steroid", "ical", "salbutamol", "budesonide"],
+      },
+      {
+        id: "asthma-control",
+        name: "Assessed asthma control",
+        points: 5,
+        category: "Examination",
+        keywords: ["control", "worse", "better", "night", "daytime", "rescue"],
+      },
+      {
+        id: "asthma-symptoms",
+        name: "Reviewed recent symptoms",
+        points: 5,
+        category: "History",
+        keywords: ["wheeze", "breath", "cough", "night", "waking", "activity"],
+      },
+      {
+        id: "asthma-inhaler-technique",
+        name: "Assessed inhaler technique",
+        points: 5,
+        category: "Examination",
+        keywords: ["technique", "inhale", "shake", "breath", "hold"],
+      },
+      {
+        id: "asthma-trigger",
+        name: "Identified triggers",
+        points: 5,
+        category: "History",
+        keywords: ["trigger", "dust", "pollen", "cold", "exercise", "stress", "infection"],
+      },
+      {
+        id: "asthma-management",
+        name: "Adjusted management plan",
+        points: 5,
+        category: "Management",
+        keywords: ["plan", "adjust", "change", "increase", "dose", "step"],
+      },
+    ],
+    automaticFailConditions: [
+      "Does not review inhaler technique",
+      "Misses deteriorating control",
+    ],
+  },
+};
+
+export function getStationTemplate(stationId: string): StationRubric | undefined {
+  return DEFAULT_STATION_TEMPLATES[stationId];
+}
+
+export function getAllStationIds(): string[] {
+  return Object.keys(DEFAULT_STATION_TEMPLATES);
+}

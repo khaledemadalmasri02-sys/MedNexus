@@ -1,0 +1,608 @@
+-- AI OSCE Simulator PostgreSQL Database Schema
+-- Chapter 11 - Complete Database ER Design & Data Relationships
+
+-- Enable UUID generation
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Enable pgvector for AI embeddings
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- ============================================================================
+-- USER ROLES TABLE
+-- ============================================================================
+CREATE TABLE roles (
+    id VARCHAR PRIMARY KEY,
+    name VARCHAR NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- UNIVERSITIES TABLE
+-- ============================================================================
+CREATE TABLE universities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR NOT NULL UNIQUE,
+    country VARCHAR,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- SPECIALTIES TABLE
+-- ============================================================================
+CREATE TABLE specialties (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- USERS TABLE (PostgreSQL version for OSCE)
+-- ============================================================================
+CREATE TABLE osce_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR UNIQUE,
+    password_hash TEXT,
+    role VARCHAR,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- STUDENT PROFILES TABLE
+-- ============================================================================
+CREATE TABLE student_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES osce_users(id) ON DELETE CASCADE,
+    university_id UUID REFERENCES universities(id),
+    year_of_study VARCHAR,
+    specialty_interest VARCHAR,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- FACULTY PROFILES TABLE
+-- ============================================================================
+CREATE TABLE faculty_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES osce_users(id) ON DELETE CASCADE,
+    university_id UUID REFERENCES universities(id),
+    department VARCHAR,
+    specialty VARCHAR,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- STATION TYPES TABLE
+-- ============================================================================
+CREATE TABLE station_types (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR NOT NULL UNIQUE,
+    description TEXT,
+    icon VARCHAR,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE STATIONS TABLE
+-- ============================================================================
+CREATE TABLE osce_stations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR NOT NULL,
+    specialty_id UUID NOT NULL REFERENCES specialties(id),
+    station_type_id UUID NOT NULL REFERENCES station_types(id),
+    difficulty VARCHAR NOT NULL DEFAULT 'medium',
+    duration INTEGER NOT NULL,
+    instructions TEXT,
+    learning_objectives JSONB NOT NULL DEFAULT '[]',
+    status VARCHAR NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- STATION VERSIONS TABLE
+-- ============================================================================
+CREATE TABLE station_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    station_id UUID NOT NULL REFERENCES osce_stations(id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL,
+    content JSONB,
+    created_by UUID REFERENCES osce_users(id),
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- PATIENTS TABLE
+-- ============================================================================
+CREATE TABLE patients (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    station_id UUID NOT NULL REFERENCES osce_stations(id) ON DELETE CASCADE,
+    name VARCHAR,
+    age INTEGER,
+    gender VARCHAR,
+    occupation VARCHAR,
+    personality VARCHAR,
+    communication_style VARCHAR
+);
+
+-- ============================================================================
+-- PATIENT CONDITIONS TABLE
+-- ============================================================================
+CREATE TABLE patient_conditions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    condition VARCHAR NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'active'
+);
+
+-- ============================================================================
+-- PATIENT HIDDEN DATA TABLE
+-- ============================================================================
+CREATE TABLE patient_hidden_data (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    category VARCHAR NOT NULL,
+    information TEXT NOT NULL,
+    importance VARCHAR NOT NULL DEFAULT 'medium'
+);
+
+-- ============================================================================
+-- CLINICAL FINDINGS TABLE
+-- ============================================================================
+CREATE TABLE clinical_findings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    system VARCHAR,
+    finding VARCHAR,
+    trigger_condition VARCHAR
+);
+
+-- ============================================================================
+-- RUBRICS TABLE
+-- ============================================================================
+CREATE TABLE rubrics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    station_id UUID NOT NULL REFERENCES osce_stations(id) ON DELETE CASCADE,
+    name VARCHAR NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0
+);
+
+-- ============================================================================
+-- RUBRIC ITEMS TABLE
+-- ============================================================================
+CREATE TABLE rubric_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rubric_id UUID NOT NULL REFERENCES rubrics(id) ON DELETE CASCADE,
+    criterion VARCHAR NOT NULL,
+    points INTEGER NOT NULL,
+    critical BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- ============================================================================
+-- OSCE SESSIONS TABLE
+-- ============================================================================
+CREATE TABLE osce_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id),
+    station_id UUID NOT NULL REFERENCES osce_stations(id),
+    started_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    ended_at TIMESTAMP,
+    status VARCHAR NOT NULL DEFAULT 'created'
+);
+
+-- ============================================================================
+-- CONVERSATION MESSAGES TABLE
+-- ============================================================================
+CREATE TABLE conversation_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES osce_sessions(id) ON DELETE CASCADE,
+    speaker VARCHAR NOT NULL,
+    message TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- AI EVENTS TABLE
+-- ============================================================================
+CREATE TABLE ai_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES osce_sessions(id) ON DELETE CASCADE,
+    agent VARCHAR NOT NULL,
+    input JSONB,
+    output JSONB,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE SCORES TABLE
+-- ============================================================================
+CREATE TABLE osce_scores (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES osce_sessions(id) ON DELETE CASCADE,
+    total_score REAL,
+    pass_status BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- SCORE COMPONENTS TABLE
+-- ============================================================================
+CREATE TABLE score_components (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    score_id UUID NOT NULL REFERENCES osce_scores(id) ON DELETE CASCADE,
+    category VARCHAR NOT NULL,
+    score REAL NOT NULL,
+    max_score REAL NOT NULL
+);
+
+-- ============================================================================
+-- FEEDBACK REPORTS TABLE
+-- ============================================================================
+CREATE TABLE feedback_reports (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES osce_sessions(id) ON DELETE CASCADE,
+    strengths JSONB NOT NULL DEFAULT '[]',
+    weaknesses JSONB NOT NULL DEFAULT '[]',
+    recommendations JSONB NOT NULL DEFAULT '[]'
+);
+
+-- ============================================================================
+-- STUDENT SKILLS TABLE
+-- ============================================================================
+CREATE TABLE student_skills (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    skill VARCHAR NOT NULL,
+    score REAL NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- STUDENT WEAKNESSES TABLE
+-- ============================================================================
+CREATE TABLE student_weaknesses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    topic VARCHAR NOT NULL,
+    frequency INTEGER NOT NULL DEFAULT 1,
+    priority VARCHAR NOT NULL DEFAULT 'medium'
+);
+
+-- ============================================================================
+-- LEARNING RECOMMENDATIONS TABLE
+-- ============================================================================
+CREATE TABLE learning_recommendations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    recommended_station_id UUID NOT NULL REFERENCES osce_stations(id),
+    reason TEXT NOT NULL,
+    completed BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- ============================================================================
+-- MEDICAL DOCUMENTS TABLE
+-- ============================================================================
+CREATE TABLE medical_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR NOT NULL,
+    source VARCHAR,
+    type VARCHAR,
+    uploaded_by UUID REFERENCES osce_users(id)
+);
+
+-- ============================================================================
+-- DOCUMENT CHUNKS TABLE (with pgvector embedding)
+-- ============================================================================
+CREATE TABLE document_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES medical_documents(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    embedding vector(1536)
+);
+
+-- ============================================================================
+-- STATION REVIEWS TABLE (Faculty Content Management)
+-- ============================================================================
+CREATE TABLE station_reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    station_id UUID NOT NULL REFERENCES osce_stations(id) ON DELETE CASCADE,
+    reviewer_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    comments TEXT
+);
+
+-- ============================================================================
+-- OSCE PROGRESS TABLE
+-- ============================================================================
+CREATE TABLE osce_progress (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    station_id UUID NOT NULL REFERENCES osce_stations(id) ON DELETE CASCADE,
+    attempts_count INTEGER NOT NULL DEFAULT 0,
+    best_score REAL,
+    average_score REAL,
+    last_attempt_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE EXAMS TABLE
+-- ============================================================================
+CREATE TABLE osce_exams (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    title VARCHAR NOT NULL,
+    description TEXT,
+    station_ids JSONB NOT NULL DEFAULT '[]',
+    total_time_minutes INTEGER NOT NULL DEFAULT 120,
+    is_mock BOOLEAN NOT NULL DEFAULT FALSE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE ATTEMPTS TABLE
+-- ============================================================================
+CREATE TABLE osce_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id),
+    exam_id UUID NOT NULL REFERENCES osce_exams(id) ON DELETE CASCADE,
+    station_id UUID NOT NULL REFERENCES osce_stations(id),
+    started_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    completed_at TIMESTAMP,
+    duration_seconds INTEGER,
+    conversation_log JSONB DEFAULT '[]',
+    score REAL,
+    scores_by_category JSONB DEFAULT '{}',
+    feedback JSONB DEFAULT '{}',
+    strengths JSONB DEFAULT '[]',
+    weaknesses JSONB DEFAULT '[]',
+    improvement_plan TEXT,
+    examiner_notes JSONB DEFAULT '{}',
+    is_completed BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE ANALYTICS TABLE
+-- ============================================================================
+CREATE TABLE osce_analytics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    station_id UUID NOT NULL REFERENCES osce_stations(id),
+    total_attempts INTEGER NOT NULL DEFAULT 0,
+    total_completions INTEGER NOT NULL DEFAULT 0,
+    average_score REAL DEFAULT 0,
+    most_failed_category VARCHAR,
+    weak_areas JSONB DEFAULT '[]',
+    last_updated TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE EXAM READINESS TABLE
+-- ============================================================================
+CREATE TABLE osce_exam_readiness (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE UNIQUE,
+    readiness_score REAL NOT NULL,
+    pass_probability VARCHAR NOT NULL,
+    critical_errors INTEGER NOT NULL DEFAULT 0,
+    consistency_score REAL NOT NULL,
+    recent_scores JSONB NOT NULL DEFAULT '[]',
+    last_calculated TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE SPACED REPETITION TABLE
+-- ============================================================================
+CREATE TABLE osce_spaced_repetition (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE,
+    station_id UUID NOT NULL REFERENCES osce_stations(id) ON DELETE CASCADE,
+    status VARCHAR NOT NULL DEFAULT 'pending',
+    next_review_at TIMESTAMP,
+    last_reviewed_at TIMESTAMP,
+    ease_factor REAL NOT NULL DEFAULT 2.5,
+    interval_days INTEGER NOT NULL DEFAULT 0,
+    repetitions INTEGER NOT NULL DEFAULT 0,
+    quality INTEGER,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE CLINICAL HEATMAP TABLE
+-- ============================================================================
+CREATE TABLE osce_clinical_heatmap (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id),
+    history_taking INTEGER NOT NULL DEFAULT 0,
+    communication INTEGER NOT NULL DEFAULT 0,
+    clinical_reasoning INTEGER NOT NULL DEFAULT 0,
+    management INTEGER NOT NULL DEFAULT 0,
+    emergency_response INTEGER NOT NULL DEFAULT 0,
+    professional_skills INTEGER NOT NULL DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE CONFIDENCE TRACKING TABLE
+-- ============================================================================
+CREATE TABLE osce_confidence_tracking (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id),
+    attempt_id UUID NOT NULL REFERENCES osce_attempts(id) ON DELETE CASCADE,
+    confidence_rating INTEGER NOT NULL,
+    self_score INTEGER,
+    actual_score INTEGER,
+    calibration_gap INTEGER,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE PROGRESS TIMELINE TABLE
+-- ============================================================================
+CREATE TABLE osce_progress_timeline (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id),
+    date VARCHAR NOT NULL,
+    average_score REAL,
+    attempts_count INTEGER NOT NULL DEFAULT 0,
+    stations_practiced INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- OSCE SETTINGS TABLE
+-- ============================================================================
+CREATE TABLE osce_settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES osce_users(id) ON DELETE CASCADE UNIQUE,
+    voice_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    auto_submit_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    show_hints BOOLEAN NOT NULL DEFAULT TRUE,
+    difficulty_filter VARCHAR NOT NULL DEFAULT 'all',
+    preferred_station_types JSONB DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+);
+
+-- ============================================================================
+-- DATABASE INDEXES
+-- ============================================================================
+
+-- Index for station specialty lookup
+CREATE INDEX idx_osce_stations_specialty ON osce_stations(specialty_id);
+
+-- Index for student session history
+CREATE INDEX idx_osce_sessions_user_id ON osce_sessions(user_id);
+
+-- Index for score lookup (analytics)
+CREATE INDEX idx_osce_scores_total_score ON osce_scores(total_score);
+
+-- Index for student skills lookup
+CREATE INDEX idx_student_skills_user_id ON student_skills(user_id);
+
+-- Index for student weaknesses
+CREATE INDEX idx_student_weaknesses_user_id ON student_weaknesses(user_id);
+
+-- Index for learning recommendations
+CREATE INDEX idx_learning_recommendations_user_id ON learning_recommendations(user_id);
+
+-- Index for conversation messages
+CREATE INDEX idx_conversation_messages_session_id ON conversation_messages(session_id);
+
+-- Index for AI events
+CREATE INDEX idx_ai_events_session_id ON ai_events(session_id);
+
+-- Index for document chunks embedding search (pgvector)
+CREATE INDEX idx_document_chunks_embedding ON document_chunks USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
+
+-- Index for progress tracking
+CREATE INDEX idx_osce_progress_user_station ON osce_progress(user_id, station_id);
+
+-- Index for station versions
+CREATE INDEX idx_station_versions_station_id ON station_versions(station_id);
+
+-- Index for patient lookup
+CREATE INDEX idx_patients_station_id ON patients(station_id);
+
+-- Index for rubrics
+CREATE INDEX idx_rubrics_station_id ON rubrics(station_id);
+
+-- Index for station reviews
+CREATE INDEX idx_station_reviews_station_id ON station_reviews(station_id);
+CREATE INDEX idx_station_reviews_reviewer_id ON station_reviews(reviewer_id);
+
+-- Index for exams
+CREATE INDEX idx_osce_exams_user_id ON osce_exams(user_id);
+
+-- Index for attempts
+CREATE INDEX idx_osce_attempts_user_id ON osce_attempts(user_id);
+CREATE INDEX idx_osce_attempts_exam_id ON osce_attempts(exam_id);
+
+-- Index for analytics
+CREATE INDEX idx_osce_analytics_station_id ON osce_analytics(station_id);
+
+-- Index for spaced repetition
+CREATE INDEX idx_osce_spaced_repetition_user_station ON osce_spaced_repetition(user_id, station_id);
+CREATE INDEX idx_osce_spaced_repetition_next_review ON osce_spaced_repetition(next_review_at);
+
+-- Index for heatmap
+CREATE INDEX idx_osce_clinical_heatmap_user_id ON osce_clinical_heatmap(user_id);
+
+-- Index for confidence tracking
+CREATE INDEX idx_osce_confidence_tracking_user_id ON osce_confidence_tracking(user_id);
+
+-- Index for progress timeline
+CREATE INDEX idx_osce_progress_timeline_user_date ON osce_progress_timeline(user_id, date);
+
+-- Unique index for student profiles
+CREATE UNIQUE INDEX idx_student_profiles_user_id ON student_profiles(user_id);
+
+-- Unique index for faculty profiles
+CREATE UNIQUE INDEX idx_faculty_profiles_user_id ON faculty_profiles(user_id);
+
+-- Unique index for student skills (one record per skill per user)
+CREATE UNIQUE INDEX idx_student_skills_user_skill ON student_skills(user_id, skill);
+
+-- Unique index for progress
+CREATE UNIQUE INDEX idx_osce_progress_user_station_unique ON osce_progress(user_id, station_id);
+
+-- Unique index for exam readiness
+CREATE UNIQUE INDEX idx_osce_exam_readiness_user_id ON osce_exam_readiness(user_id);
+
+-- ============================================================================
+-- TRIGGERS FOR UPDATED_AT
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_osce_stations_updated_at 
+    BEFORE UPDATE ON osce_stations 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_osce_progress_updated_at 
+    BEFORE UPDATE ON osce_progress 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_osce_exams_updated_at 
+    BEFORE UPDATE ON osce_exams 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_osce_attempts_updated_at 
+    BEFORE UPDATE ON osce_attempts 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_station_versions_updated_at 
+    BEFORE UPDATE ON station_versions 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_osce_spaced_repetition_updated_at 
+    BEFORE UPDATE ON osce_spaced_repetition 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_osce_clinical_heatmap_updated_at 
+    BEFORE UPDATE ON osce_clinical_heatmap 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_osce_settings_updated_at 
+    BEFORE UPDATE ON osce_settings 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();

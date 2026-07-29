@@ -1,0 +1,11 @@
+
+version: "3"
+agent:
+    authtoken: 3GzdLze3PZ3DsH236mlgUP2xTuG_AKZcjnKwzh25WNeRaJUH
+tunnels:
+  lmstudio:
+    addr: 192.168.100.99:1234
+    proto: http
+  backend:
+    addr: localhost:3001
+    proto: http

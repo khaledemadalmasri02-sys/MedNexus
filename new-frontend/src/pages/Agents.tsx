@@ -2,24 +2,15 @@ import React, { useRef, useState, useCallback, useEffect, useMemo, type MouseEve
 import { Link, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence, useMotionValue, useSpring, useTransform } from "framer-motion";
 import {
-  Bot, Brain, GraduationCap, FileText, Lightbulb, TrendingUp,
-  Camera, Mic, Users, Stethoscope, Sparkles, ArrowRight, BookOpen,
-  Search, X, Zap, Clock, BarChart3, Star, ThumbsUp, ThumbsDown,
-  Pin, PinOff, ChevronDown, ChevronUp, HelpCircle, Play,
-  MessageSquare, Wand2, AlertCircle, ArrowLeftRight,
-  Layers, GitBranch, Sun, Moon, Coffee, MoonIcon,
-  Flame, Bell,
+  Bot, Sparkles, Search, X, Clock, BarChart3, Star, ThumbsUp, ThumbsDown,
+  Pin, PinOff, ChevronDown, HelpCircle, ArrowRight, MessageSquare, Layers,
 } from "lucide-react";
 import { staggerContainer, listItem } from "../components/ui/constants";
 
-type Category = "all" | "tutors" | "generators" | "analytics" | "tools";
+type Category = "all";
 
 const CATEGORIES: { id: Category; label: string; icon: typeof Bot }[] = [
   { id: "all", label: "All", icon: Sparkles },
-  { id: "tutors", label: "Tutors", icon: Mic },
-  { id: "generators", label: "Generators", icon: FileText },
-  { id: "analytics", label: "Analytics", icon: BarChart3 },
-  { id: "tools", label: "Tools", icon: Zap },
 ];
 
 type Agent = {
@@ -31,7 +22,7 @@ type Agent = {
   color: string;
   featured: boolean;
   status: "online" | "beta" | "offline";
-  category: Exclude<Category, "all">;
+  category?: Category;
   tags: string[];
   usageCount: number;
   lastUsed: string;
@@ -51,92 +42,24 @@ type RecommendedAgent = Agent & { reason: string };
 
 const agentHealthData: Record<string, { responseTime: string; uptime: string; lastIncident: string; status: "healthy" | "degraded" | "down" }> = {
   "/chat": { responseTime: "120ms", uptime: "99.9%", lastIncident: "5 days ago", status: "healthy" },
-  "/smart-review": { responseTime: "350ms", uptime: "99.7%", lastIncident: "2 days ago", status: "healthy" },
-  "/exam": { responseTime: "280ms", uptime: "99.8%", lastIncident: "1 week ago", status: "healthy" },
-  "/summarize": { responseTime: "1.2s", uptime: "98.5%", lastIncident: "3 days ago", status: "degraded" },
-  "/mnemonics": { responseTime: "180ms", uptime: "99.9%", lastIncident: "2 weeks ago", status: "healthy" },
-  "/coach": { responseTime: "420ms", uptime: "99.6%", lastIncident: "4 days ago", status: "healthy" },
-  "/image-analyze": { responseTime: "2.1s", uptime: "97.8%", lastIncident: "1 day ago", status: "degraded" },
-  "/voice-study": { responseTime: "550ms", uptime: "99.4%", lastIncident: "6 days ago", status: "healthy" },
-  "/group-study": { responseTime: "200ms", uptime: "99.0%", lastIncident: "1 week ago", status: "healthy" },
-  "/deck/1/doctor": { responseTime: "310ms", uptime: "99.8%", lastIncident: "3 days ago", status: "healthy" },
-  "/articles": { responseTime: "1.8s", uptime: "98.2%", lastIncident: "5 days ago", status: "degraded" },
-  "/studypilot": { responseTime: "90ms", uptime: "100%", lastIncident: "never", status: "healthy" },
 };
 
 const agentIOData: Record<string, { input: string; output: string }> = {
   "/chat": { input: "A question or topic", output: "Detailed explanation with markdown formatting" },
-  "/smart-review": { input: "Your study history & cards", output: "Prioritized card queue for review" },
-  "/exam": { input: "Select decks + question count", output: "Timed exam with scoring & analytics" },
-  "/summarize": { input: "PDF or text notes", output: "Structured summary + suggested flashcards" },
-  "/mnemonics": { input: "Concept or card IDs", output: "Creative mnemonics (acronym, story, rhyme)" },
-  "/coach": { input: "Study history data", output: "Analytics dashboard + weekly plan" },
-  "/image-analyze": { input: "Medical image upload", output: "Findings + teaching flashcards" },
-  "/voice-study": { input: "Spoken answer via microphone", output: "Accuracy score + detailed feedback" },
-  "/group-study": { input: "Room ID or create new room", output: "Shared quiz session with peers" },
-  "/deck/1/doctor": { input: "Deck ID to analyze", output: "Health report + fix suggestions" },
-  "/articles": { input: "Deck topics & material", output: "Long-form article with LaTeX + quizzes" },
-  "/studypilot": { input: "Paste notes, PDF, or image", output: "Module decks + deadline-driven schedule" },
 };
 
-const workflows = [
-  {
-    id: "exam-prep",
-    title: "Exam Prep",
-    description: "Prepare for exams with a complete workflow",
-    agents: ["/deck/1/doctor", "/smart-review", "/exam"],
-    icon: GraduationCap,
-  },
-  {
-    id: "content-creation",
-    title: "Content Creation",
-    description: "Transform material into study resources",
-    agents: ["/summarize", "/articles", "/mnemonics"],
-    icon: FileText,
-  },
-  {
-    id: "quick-study",
-    title: "Quick Study",
-    description: "Fast study session on the go",
-    agents: ["/chat", "/voice-study", "/smart-review"],
-    icon: Zap,
-  },
-];
+const workflows = [];
 
 const agentStreaks: Record<string, number> = {
   "/chat": 5,
-  "/smart-review": 3,
-  "/exam": 0,
-  "/summarize": 2,
-  "/mnemonics": 0,
-  "/coach": 0,
-  "/image-analyze": 0,
-  "/voice-study": 1,
-  "/group-study": 0,
-  "/deck/1/doctor": 0,
-  "/articles": 0,
 };
 
 const agentDifficulty: Record<string, { level: "beginner" | "intermediate" | "advanced"; label: string }> = {
   "/chat": { level: "beginner", label: "Beginner" },
-  "/smart-review": { level: "intermediate", label: "Intermediate" },
-  "/exam": { level: "advanced", label: "Advanced" },
-  "/summarize": { level: "beginner", label: "Beginner" },
-  "/mnemonics": { level: "beginner", label: "Beginner" },
-  "/coach": { level: "intermediate", label: "Intermediate" },
-  "/image-analyze": { level: "advanced", label: "Advanced" },
-  "/voice-study": { level: "intermediate", label: "Intermediate" },
-  "/group-study": { level: "intermediate", label: "Intermediate" },
-  "/deck/1/doctor": { level: "beginner", label: "Beginner" },
-  "/articles": { level: "advanced", label: "Advanced" },
 };
 
 const agentNotifications: Record<string, { message: string; type: "new" | "update" | "reminder" }[]> = {
   "/chat": [{ message: "New: Academic mode now supports citations", type: "update" }],
-  "/smart-review": [{ message: "Your review session is ready!", type: "reminder" }],
-  "/exam": [{ message: "New: Clinical vignette questions added", type: "new" }],
-  "/image-analyze": [{ message: "New: Now supports radiology scans", type: "new" }],
-  "/group-study": [{ message: "3 classmates used this today", type: "update" }],
 };
 
 const agents: Agent[] = [
@@ -144,7 +67,7 @@ const agents: Agent[] = [
     to: "/chat", icon: Bot, label: "Study Buddy",
     desc: "Conversational AI tutor that explains, quizzes, and adapts to your learning style",
     longDesc: "An adaptive AI tutor that explains medical concepts, quizzes you on material, and adjusts to your learning pace. Supports both brief and academic response modes.",
-    color: "#8B5CF6", featured: true, status: "online", category: "tutors",
+    color: "#8B5CF6", featured: true, status: "online",
     tags: ["AI-powered", "Adaptive", "Chat"], usageCount: 847, lastUsed: "2h ago",
     examplePrompt: "Explain the mechanism of action of ACE inhibitors",
     quickActionLabel: "Ask a question", quickActionIcon: MessageSquare,
@@ -156,193 +79,15 @@ const agents: Agent[] = [
     healthLastIncident: "5 days ago",
     healthStatus: "healthy",
   },
-  {
-    to: "/smart-review", icon: Brain, label: "Smart Review",
-    desc: "AI-curated review sessions targeting your weakest areas with spaced repetition",
-    longDesc: "Analyzes your study history to identify weak areas and generates targeted review sessions using spaced repetition principles.",
-    color: "#3B82F6", featured: true, status: "online", category: "analytics",
-    tags: ["Spaced repetition", "Adaptive", "AI-powered"], usageCount: 623, lastUsed: "5h ago",
-    examplePrompt: "Start a review session for my weakest cards",
-    quickActionLabel: "Start review", quickActionIcon: Play,
-    emptyStateMessage: "Study some cards first, then I'll identify your weak areas.",
-    inputDescription: "Your study history & cards",
-    outputDescription: "Prioritized card queue for review",
-    healthResponseTime: "350ms",
-    healthUptime: "99.7%",
-    healthLastIncident: "2 days ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/exam", icon: GraduationCap, label: "Exam Simulator",
-    desc: "Full-length mock exams with timing, scoring, and detailed analytics",
-    longDesc: "Generate full-length mock exams from your decks with realistic timing, detailed scoring, topic breakdowns, and performance analytics.",
-    color: "#F59E0B", featured: true, status: "online", category: "tools",
-    tags: ["Timed", "Scoring", "Analytics"], usageCount: 412, lastUsed: "1d ago",
-    examplePrompt: "Generate a 50-question exam from my cardiology deck",
-    quickActionLabel: "Generate exam", quickActionIcon: Wand2,
-    emptyStateMessage: "Add cards to a deck first to generate exams from your material.",
-    inputDescription: "Select decks + question count",
-    outputDescription: "Timed exam with scoring & analytics",
-    healthResponseTime: "280ms",
-    healthUptime: "99.8%",
-    healthLastIncident: "1 week ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/summarize", icon: FileText, label: "Summarizer",
-    desc: "Transform PDFs and notes into concise study summaries",
-    longDesc: "Upload PDFs or paste notes to generate structured study summaries with key points, definitions, clinical pearls, and suggested flashcards.",
-    color: "#06B6D4", featured: false, status: "online", category: "generators",
-    tags: ["PDF support", "AI-powered", "Flashcards"], usageCount: 389, lastUsed: "3h ago",
-    examplePrompt: "Summarize this pharmacology chapter into key points",
-    quickActionLabel: "Summarize content", quickActionIcon: FileText,
-    emptyStateMessage: "Upload a PDF or paste notes to get started.",
-    inputDescription: "PDF or text notes",
-    outputDescription: "Structured summary + suggested flashcards",
-    healthResponseTime: "1.2s",
-    healthUptime: "98.5%",
-    healthLastIncident: "3 days ago",
-    healthStatus: "degraded",
-  },
-  {
-    to: "/mnemonics", icon: Lightbulb, label: "Mnemonics",
-    desc: "Generate memorable acronyms and mental frameworks",
-    longDesc: "Create creative mnemonics — acronyms, visual stories, rhymes — to help you memorize complex medical information.",
-    color: "#A855F7", featured: false, status: "online", category: "generators",
-    tags: ["Memory aids", "Creative", "AI-powered"], usageCount: 256, lastUsed: "1d ago",
-    examplePrompt: "Create a mnemonic for the cranial nerves",
-    quickActionLabel: "Generate mnemonic", quickActionIcon: Wand2,
-    emptyStateMessage: "Select cards or enter a concept to generate mnemonics.",
-    inputDescription: "Concept or card IDs",
-    outputDescription: "Creative mnemonics (acronym, story, rhyme)",
-    healthResponseTime: "180ms",
-    healthUptime: "99.9%",
-    healthLastIncident: "2 weeks ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/coach", icon: TrendingUp, label: "Progress Coach",
-    desc: "AI analytics and weekly study plan recommendations",
-    longDesc: "Analyzes your study patterns, identifies weak topics, and generates personalized weekly study plans with actionable recommendations.",
-    color: "#EC4899", featured: false, status: "online", category: "analytics",
-    tags: ["Analytics", "Planning", "AI-powered"], usageCount: 198, lastUsed: "2d ago",
-    examplePrompt: "Show my study progress and recommend focus areas",
-    quickActionLabel: "View analytics", quickActionIcon: BarChart3,
-    emptyStateMessage: "Study for a few days to unlock personalized analytics.",
-    inputDescription: "Study history data",
-    outputDescription: "Analytics dashboard + weekly plan",
-    healthResponseTime: "420ms",
-    healthUptime: "99.6%",
-    healthLastIncident: "4 days ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/image-analyze", icon: Camera, label: "Image AI",
-    desc: "Convert medical images and diagrams into flashcards",
-    longDesc: "Upload medical images, diagrams, or histopathology slides to get AI-generated teaching points and flashcards.",
-    color: "#F43F5E", featured: false, status: "online", category: "tools",
-    tags: ["Image input", "Flashcards", "AI-powered"], usageCount: 145, lastUsed: "3d ago",
-    examplePrompt: "Analyze this ECG image and explain the findings",
-    quickActionLabel: "Upload image", quickActionIcon: Camera,
-    emptyStateMessage: "Upload a medical image to generate teaching points.",
-    inputDescription: "Medical image upload",
-    outputDescription: "Findings + teaching flashcards",
-    healthResponseTime: "2.1s",
-    healthUptime: "97.8%",
-    healthLastIncident: "1 day ago",
-    healthStatus: "degraded",
-  },
-  {
-    to: "/voice-study", icon: Mic, label: "Voice Tutor",
-    desc: "Practice with spoken Q&A and verbal explanations",
-    longDesc: "Study hands-free with voice-based Q&A. Speak your answers and get instant feedback on accuracy and completeness.",
-    color: "#10B981", featured: false, status: "online", category: "tutors",
-    tags: ["Voice input", "Hands-free", "Feedback"], usageCount: 134, lastUsed: "4d ago",
-    examplePrompt: "Quiz me on pharmacology using voice",
-    quickActionLabel: "Start voice session", quickActionIcon: Mic,
-    emptyStateMessage: "Connect a microphone and add cards to start voice study.",
-    inputDescription: "Spoken answer via microphone",
-    outputDescription: "Accuracy score + detailed feedback",
-    healthResponseTime: "550ms",
-    healthUptime: "99.4%",
-    healthLastIncident: "6 days ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/group-study", icon: Users, label: "Group Study",
-    desc: "Collaborative study rooms with shared questions",
-    longDesc: "Create or join study rooms to collaborate with peers. Share decks, generate questions together, and compete on quizzes.",
-    color: "#06B6D4", featured: false, status: "beta", category: "tools",
-    tags: ["Collaborative", "Multiplayer", "Real-time"], usageCount: 89, lastUsed: "1w ago",
-    examplePrompt: "Create a group study room for anatomy",
-    quickActionLabel: "Create room", quickActionIcon: Users,
-    emptyStateMessage: "Invite friends to study together in real-time.",
-    inputDescription: "Room ID or create new room",
-    outputDescription: "Shared quiz session with peers",
-    healthResponseTime: "200ms",
-    healthUptime: "99.0%",
-    healthLastIncident: "1 week ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/deck/1/doctor", icon: Stethoscope, label: "Deck Doctor",
-    desc: "AI-powered deck quality audit and auto-fix",
-    longDesc: "Analyzes your flashcard deck for duplicates, vague questions, missing explanations, and suggests AI-powered fixes.",
-    color: "#22C55E", featured: false, status: "online", category: "analytics",
-    tags: ["Quality audit", "Auto-fix", "AI-powered"], usageCount: 167, lastUsed: "6h ago",
-    examplePrompt: "Audit my deck for quality issues",
-    quickActionLabel: "Audit deck", quickActionIcon: Stethoscope,
-    emptyStateMessage: "Create a deck first to run a quality audit.",
-    inputDescription: "Deck ID to analyze",
-    outputDescription: "Health report + fix suggestions",
-    healthResponseTime: "310ms",
-    healthUptime: "99.8%",
-    healthLastIncident: "3 days ago",
-    healthStatus: "healthy",
-  },
-  {
-    to: "/articles", icon: BookOpen, label: "Articles",
-    desc: "Generate long-form articles from your deck topics with LaTeX and self-quizzes",
-    longDesc: "Transform your study material into comprehensive long-form articles with LaTeX formatting, embedded diagrams, and self-assessment quizzes.",
-    color: "#14B8A6", featured: false, status: "online", category: "generators",
-    tags: ["Long-form", "LaTeX", "Self-quizzes"], usageCount: 112, lastUsed: "5d ago",
-    examplePrompt: "Write an article on heart failure based on my deck",
-    quickActionLabel: "Write article", quickActionIcon: BookOpen,
-    emptyStateMessage: "Add cards to generate articles from your material.",
-    inputDescription: "Deck topics & material",
-    outputDescription: "Long-form article with LaTeX + quizzes",
-    healthResponseTime: "1.8s",
-    healthUptime: "98.2%",
-    healthLastIncident: "5 days ago",
-    healthStatus: "degraded",
-  },
-  {
-    to: "/studypilot", icon: GraduationCap, label: "StudyPilot",
-    desc: "Turn notes, PDFs, and images into a deadline-driven study plan",
-    longDesc: "Heuristic planner (no AI): splits your material into flashcards, clusters them into modules, and builds a spaced-repetition schedule that finishes before your deadline.",
-    color: "#A855F7", featured: false, status: "online", category: "tools",
-    tags: ["Heuristic", "Planning", "Spaced repetition"], usageCount: 64, lastUsed: "1d ago",
-    examplePrompt: "Plan 3 weeks of cell biology before my exam",
-    quickActionLabel: "Open StudyPilot", quickActionIcon: Wand2,
-    emptyStateMessage: "Paste notes, upload a PDF, or OCR an image to get started.",
-    inputDescription: "Paste notes, PDF, or image (OCR)",
-    outputDescription: "Module decks + deadline-driven schedule",
-    healthResponseTime: "90ms",
-    healthUptime: "100%",
-    healthLastIncident: "never",
-    healthStatus: "healthy",
-  },
 ];
 
 const recommendedAgents = [
   { agentId: "/chat", reason: "You study most in the morning — start with a quick chat session" },
-  { agentId: "/deck/1/doctor", reason: "Your deck hasn't been audited recently — check for quality issues" },
-  { agentId: "/smart-review", reason: "You have 47 cards due for review today" },
 ];
 
 const TOUR_STEPS = [
-  { target: ".agents-header", title: "Welcome to AI Agents", content: "Your personal study assistants. Each agent helps you learn in a different way." },
-  { target: ".agents-search", title: "Search & Filter", content: "Find agents by name, capability, or category. Try searching for 'PDF' or 'voice'." },
+  { target: ".agents-header", title: "Welcome to AI Agents", content: "Your personal study assistants. Start chatting with Study Buddy to get started." },
+  { target: ".agents-search", title: "Search & Filter", content: "Find agents by name or capability." },
   { target: ".agents-recommended", title: "Recommended for You", content: "Personalized suggestions based on your study patterns." },
   { target: ".agents-featured", title: "Featured Agents", content: "The most popular agents used by students." },
   { target: ".agents-all", title: "All Agents", content: "Browse all available agents. Pin your favorites to the top!" },
@@ -1467,38 +1212,14 @@ function TimeBasedBanner() {
 
   if (dismissed) return null;
 
-  const banner: { icon: typeof Sun; text: string; suggestion: string; agentTo: string; color: string } | null =
-    hour >= 6 && hour < 12
-      ? {
-          icon: Coffee,
-          text: "Good morning! Start your day with a quick review session",
-          suggestion: "Try Smart Review",
-          agentTo: "/smart-review",
-          color: "#3B82F6",
-        }
-      : hour >= 12 && hour < 18
-        ? {
-            icon: Sun,
-            text: "Afternoon study boost? Try Voice Tutor for hands-free learning",
-            suggestion: "Try Voice Tutor",
-            agentTo: "/voice-study",
-            color: "#10B981",
-          }
-        : hour >= 18 && hour < 22
-          ? {
-              icon: MoonIcon,
-              text: "Wind down with some mnemonics or a quick chat",
-              suggestion: "Try Mnemonics",
-              agentTo: "/mnemonics",
-              color: "#A855F7",
-            }
-          : {
-              icon: Moon,
-              text: "Late night study? Exam Simulator is ready when you are",
-              suggestion: "Try Exam Simulator",
-              agentTo: "/exam",
-              color: "#F59E0B",
-            };
+  const banner: { icon: typeof Bot; text: string; suggestion: string; agentTo: string; color: string } | null =
+    {
+      icon: Bot,
+      text: "Welcome to Study Buddy! Ask me anything to get started",
+      suggestion: "Start a chat",
+      agentTo: "/chat",
+      color: "#8B5CF6",
+    };
 
   if (!banner) return null;
 
@@ -1795,10 +1516,7 @@ function InlineChatPreview() {
 function AgentCollections() {
   const [collections, setCollections] = useState<{ name: string; agents: string[] }[]>(() => {
     const stored = localStorage.getItem("agent-collections");
-    return stored ? JSON.parse(stored) : [
-      { name: "Exam Prep", agents: ["/exam", "/smart-review", "/deck/1/doctor"] },
-      { name: "Content Creation", agents: ["/summarize", "/articles", "/mnemonics"] },
-    ];
+    return stored ? JSON.parse(stored) : [];
   });
 
   const [showCreate, setShowCreate] = useState(false);

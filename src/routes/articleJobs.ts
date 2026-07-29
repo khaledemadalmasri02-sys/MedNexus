@@ -202,6 +202,11 @@ articleJobRoutes.delete("/article-jobs/:id", async (c) => {
 
 // SSE stream — poll the DB row and emit named `status` events (no in-memory bus on Workers).
 articleJobRoutes.get("/article-jobs/:id/stream", async (c) => {
+  const accept = c.req.header("accept") || "";
+  if (!accept.includes("text/event-stream")) {
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Client must accept text/event-stream" } }, 406);
+  }
+
   const id = c.req.param("id");
   const db = getDb(c);
   const encoder = new TextEncoder();

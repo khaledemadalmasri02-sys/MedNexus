@@ -2,20 +2,37 @@ import type { Context } from "hono";
 import type { AppEnv } from "../types";
 import type { DB } from "../db/index";
 
-// D1 caps a single statement at ~100 bound parameters. Inserting many rows
-// in one `values([...])` call (cards × columns) can exceed that and throw
+// D1 caps a single statement at ~1000 bound parameters. Inserting many rows
+// in one `values([...])` call (rows × columns) can exceed that and throw
 // "too many SQL variables". This inserts in safe batches and returns all rows.
+// Use conservative limits to stay well under D1's 1000 parameter limit.
 export async function insertBatched<T extends Record<string, unknown>>(
   db: DB,
   table: any,
   rows: T[],
-  batchSize = 10,
+  batchSize = 3,
+  maxRetries = 3,
 ): Promise<T[]> {
+  if (rows.length === 0) return [];
+
+  const maxParamsPerQuery = 300;
+  const safeBatchSize = Math.max(1, Math.min(batchSize, Math.floor(maxParamsPerQuery / (rows[0] ? Object.keys(rows[0]).length : 1))));
+
   const out: T[] = [];
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const chunk = rows.slice(i, i + batchSize);
-    const inserted = await db.insert(table).values(chunk).returning();
-    out.push(...(inserted as T[]));
+  for (let i = 0; i < rows.length; i += safeBatchSize) {
+    const chunk = rows.slice(i, i + safeBatchSize);
+    let attempt = 0;
+    while (attempt < maxRetries) {
+      try {
+        const inserted = await db.insert(table).values(chunk).returning();
+        out.push(...(inserted as T[]));
+        break;
+      } catch (err) {
+        attempt++;
+        if (attempt >= maxRetries) throw err;
+        await new Promise(r => setTimeout(r, 100 * attempt));
+      }
+    }
   }
   return out;
 }

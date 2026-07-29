@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Zap, LayoutDashboard, Library, Sparkles, History, CalendarDays,
   Menu, X, Flame, Settings,
-  User, Award, HelpCircle, Gamepad2, Wand2, Smartphone, BookOpen, GraduationCap,
+  User, Award, HelpCircle, Wand2, Smartphone, BookOpen,
 } from "lucide-react";
 import { useTheme } from '../context/ThemeContext';
 import NotificationBell from './planner/NotificationBell';
@@ -21,10 +21,8 @@ export const NavbarVisibilityProvider = ({ children }: { children: ReactNode }) 
 const navLinks = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/library', label: 'Library', icon: Library },
-  { to: '/game', label: 'Game Center', icon: Gamepad2 },
   { to: '/history', label: 'History', icon: History },
   { to: '/planner', label: 'Planner', icon: CalendarDays },
-  { to: '/studypilot', label: 'StudyPilot', icon: GraduationCap },
   { to: '/agents', label: 'AI Agents', icon: Wand2 },
   { to: '/articles', label: 'Articles', icon: BookOpen },
   { to: '/download', label: 'App', icon: Smartphone },

@@ -1,0 +1,55 @@
+{
+  "name": "mednexus-cloudflare",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2025-07-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "1c6980a08850bab43d5a92964a29a37f",
+  "workers_dev": false,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mednexus-db",
+      "database_id": "530cb7af-f6c4-42ed-beaa-673321539f8c",
+      "migrations_dir": "migrations"
+    }
+  ],
+"vars": {
+    "NODE_ENV": "production",
+    "FREE_MAX_DECKS": "100",
+    "FREE_MAX_CARDS_PER_DECK": "200",
+    "APP_URL": "https://mednexus.workers.dev",
+    "LOCAL_AI_URL": "https://vicinity-resend-flakily.ngrok-free.dev/v1",
+    "AI_TEXT_MODEL": "lmstudio/qwen3.5-4b",
+    "AI_VISION_MODEL": "lmstudio/qwen3.5-4b",
+    "AI_QBANK_MODEL": "lmstudio/qwen3.5-4b",
+    "AI_EXPLAIN_MODEL": "lmstudio/qwen3.5-4b",
+    "STUDY_BUDDY_MODEL": "lmstudio/qwen3.5-4b",
+    "OSCE_AI_MODEL": "lmstudio/qwen3-8b",
+    "OSCE_TEXT_MODEL": "lmstudio/qwen3-8b",
+    "GOOGLE_CLIENT_ID": "911372032508-7oi1o2s1o76c3uhiajj9eiuong17ulr3.apps.googleusercontent.com",
+    "LM_STUDIO_URL": "http://localhost:1234",
+    "OPENAI_MODEL": "gpt-4o-mini",
+    "LOCAL_AI_TIMEOUT_MS": "60000"
+  },
+  "routes": [
+    { "pattern": "mednexus.fit", "zone_name": "mednexus.fit" },
+    { "pattern": "ai.mednexus.fit", "zone_name": "mednexus.fit" }
+  ],
+  "kv_namespaces": [],
+  "r2_buckets": [],
+  "hyperdrive": [],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true
+    }
+  }
+}

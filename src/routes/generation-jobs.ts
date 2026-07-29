@@ -269,6 +269,11 @@ generationJobRoutes.delete("/:id", async (c) => {
 });
 
 generationJobRoutes.get("/:id/stream", async (c) => {
+  const accept = c.req.header("accept") || "";
+  if (!accept.includes("text/event-stream")) {
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Client must accept text/event-stream" } }, 406);
+  }
+
   const id = c.req.param("id");
   const db = getDb(c);
   const encoder = new TextEncoder();

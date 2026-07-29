@@ -18,6 +18,7 @@ import SummaryResult from "../components/summary/SummaryResult";
 import PerFileProgressList from "../components/summary/PerFileProgressList";
 import { useSummaryGeneration } from "../hooks/useSummaryGeneration";
 import { extractPdfTextClient } from "../lib/pdfExtractClient";
+import { DeckSelector } from "../components/deck/DeckSelector";
 
 type Mode = "deck" | "qbank" | "summary";
 type DeckStep = "input" | "processing" | "preview" | "saved";
@@ -68,6 +69,8 @@ export default function Generate() {
   const [useStreaming, setUseStreaming] = useState(true);
   const [overallProgress, setOverallProgress] = useState(0);
   const [usedOfflineFallback, setUsedOfflineFallback] = useState(false);
+  const [isPartial, setIsPartial] = useState(false);
+  const [selectedParentDeck, setSelectedParentDeck] = useState<number | null>(null);
   const deckFileInputRef = useRef<HTMLInputElement>(null);
   const summaryFileInputRef = useRef<HTMLInputElement>(null);
   const deckCleanupRef = useRef<(() => void) | null>(null);
@@ -166,19 +169,75 @@ export default function Generate() {
     setPreviewCards([]); setOverallProgress(0); setUsedOfflineFallback(false);
     try {
       if (useStreaming) {
+        // Track deck id from deck_created event as fallback in case complete is delayed
+        let streamedDeckId: number | null = null;
+        let streamFinished = false;
+
         deckCleanupRef.current = api.generateApi.stream(
-          { text, deckName, cardCount, deckType: mode as "deck" | "qbank" },
+          { text, deckName, cardCount, deckType: mode as "deck" | "qbank", parentId: selectedParentDeck },
           (event, data) => {
-            if (event === "status") { setProgress((p) => [...p, (data as { message: string }).message]); setOverallProgress((p) => Math.min(p + 10, 90)); if ((data as { message: string }).message.includes("offline generator")) setUsedOfflineFallback(true); }
-            else if (event === "card") { setPreviewCards((p) => [...p, data as PreviewCard]); setOverallProgress((p) => Math.min(p + 5, 95)); }
-            else if (event === "complete") { setSavedDeckId((data as { deck: { id: number } }).deck.id); setUsedOfflineFallback((data as { usedOfflineFallback?: boolean }).usedOfflineFallback || false); setDeckStep("saved"); setOverallProgress(100); }
-            else if (event === "error") { setDeckError((data as { message: string }).message); setDeckStep("input"); }
+            if (event === "status") {
+              setProgress((p) => [...p, (data as { message: string }).message]);
+              setOverallProgress((p) => Math.min(p + 10, 90));
+              if ((data as { message: string }).message.includes("offline generator")) setUsedOfflineFallback(true);
+            }
+            else if (event === "deck_created") {
+              // Store the deck id early so we can recover if complete is never received
+              streamedDeckId = (data as { deckId: number }).deckId;
+            }
+            else if (event === "card") {
+              setPreviewCards((p) => [...p, data as PreviewCard]);
+              setOverallProgress((p) => Math.min(p + 5, 95));
+            }
+            else if (event === "complete") {
+              streamFinished = true;
+              interface CompleteData {
+                deck?: { id: number };
+                generationId?: number;
+                usedOfflineFallback?: boolean;
+                partial?: boolean;
+              }
+              const dataTyped = data as CompleteData;
+              const deckId = dataTyped.deck?.id ?? dataTyped.generationId ?? streamedDeckId;
+              setSavedDeckId(deckId);
+              setUsedOfflineFallback(dataTyped.usedOfflineFallback || false);
+              setIsPartial(dataTyped.partial || false);
+              setDeckStep("saved");
+              setOverallProgress(100);
+            }
+            else if (event === "stream_end") {
+              // Stream ended cleanly — if complete was already received, do nothing.
+              // If not (e.g. Worker timed out after DB insert), recover using deck_created id.
+              if (!streamFinished && streamedDeckId !== null) {
+                streamFinished = true;
+                setSavedDeckId(streamedDeckId);
+                setDeckStep("saved");
+                setOverallProgress(100);
+              }
+            }
+            else if (event === "error") {
+              streamFinished = true;
+              setDeckError((data as { message: string }).message);
+              setDeckStep("input");
+            }
           },
-          (err) => { setDeckError(err.message); setDeckStep("input"); }
+
+          (err) => {
+            // Stream ended with a fetch error — if we already got cards from streaming,
+            // use those and show them as saved (the DB insert already ran server-side)
+            if (!streamFinished && streamedDeckId !== null) {
+              setSavedDeckId(streamedDeckId);
+              setDeckStep("saved");
+              setOverallProgress(100);
+            } else if (!streamFinished) {
+              setDeckError(err.message);
+              setDeckStep("input");
+            }
+          }
         );
       } else {
         setProgress(["Generating cards..."]); setOverallProgress(30);
-        const result = await api.generateApi.generate({ text, deckName, cardCount, deckType: mode as "deck" | "qbank" });
+        const result = await api.generateApi.generate({ text, deckName, cardCount, deckType: mode as "deck" | "qbank", parentId: selectedParentDeck });
         setOverallProgress(100); setUsedOfflineFallback(result.usedOfflineFallback || false);
         setPreviewCards(result.cards.map((c) => ({ front: c.front, back: c.back, tags: c.tags ? c.tags.split(",") : undefined, choices: c.choices ? JSON.parse(c.choices) : undefined, correctIndex: c.correctIndex ?? undefined })));
         setSavedDeckId(result.deck.id); setDeckStep("saved");
@@ -186,16 +245,28 @@ export default function Generate() {
     } catch (err) { setDeckError((err as Error).message); setDeckStep("input"); }
   };
 
+
   const handleDeckReset = () => {
     deckCleanupRef.current?.();
-    setDeckStep("input"); setDeckName(""); setText(""); setDeckFiles([]); setDeckError(null); setProgress([]); setPreviewCards([]); setSavedDeckId(null); setOverallProgress(0); setUsedOfflineFallback(false);
+    setDeckStep("input");
+    setDeckName("");
+    setText("");
+    setDeckFiles([]);
+    setDeckError(null);
+    setProgress([]);
+    setPreviewCards([]);
+    setSavedDeckId(null);
+    setOverallProgress(0);
+    setUsedOfflineFallback(false);
+    setIsPartial(false);
+    setSelectedParentDeck(null);
   };
 
   const handleSaveToLibrary = async () => {
     if (previewCards.length === 0) return;
     try {
       setIsProcessing(true);
-      const deck = await api.decksApi.create({ name: deckName, kind: mode as "deck" | "qbank" });
+      const deck = await api.decksApi.create({ name: deckName, kind: mode as "deck" | "qbank", parentId: selectedParentDeck ?? undefined });
       for (const card of previewCards) { await api.cardsApi.create({ deckId: deck.id, front: card.front, back: card.back, tags: card.tags?.join(","), cardType: card.choices ? "mcq" : "basic", choices: card.choices ? JSON.stringify(card.choices) : undefined, correctIndex: card.correctIndex }); }
       setSavedDeckId(deck.id); setDeckStep("saved");
     } catch (err) { setDeckError((err as Error).message); }
@@ -347,7 +418,26 @@ export default function Generate() {
                 <div className="space-y-5">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <GlowingInput label="Deck Name" value={deckName} onChange={(e) => setDeckName(e.target.value)} placeholder="e.g. Cardiology Basics" />
+                    <div>
+                      <label className="block text-sm font-medium text-text-secondary mb-2">Add to Folder</label>
+                      <DeckSelector
+                        value={selectedParentDeck}
+                        onChange={setSelectedParentDeck}
+                        placeholder="Add to folder..."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <GlowingInput label="Number of Cards" type="number" value={cardCount} onChange={(e) => setCardCount(Math.max(1, Math.min(300, parseInt(e.target.value) || 10)))} min={1} max={300} />
+                    <div>
+                      <label className="block text-sm font-medium text-text-secondary mb-2">
+                        {isQbank ? "Number of Questions" : "Number of Cards"}
+                      </label>
+                      <div className="px-3 py-2 rounded-lg text-sm" style={{ background: "var(--glass-input-bg)", border: "1px solid var(--glass-border-light)", color: "var(--text-primary)" }}>
+                        {cardCount}
+                      </div>
+                    </div>
                   </div>
 
                   <div>
@@ -485,14 +575,15 @@ export default function Generate() {
             )}
 
             {deckStep === "saved" && (
-              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="rounded-2xl p-8 text-center relative overflow-hidden" style={{ background: "var(--glass-card-bg)", border: "1px solid rgba(16, 185, 129, 0.2)", backdropFilter: "blur(20px)" }}>
+              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="rounded-2xl p-8 text-center relative overflow-hidden" style={{ background: isPartial ? "rgba(239,68,68,0.08)" : "var(--glass-card-bg)", border: `1px solid ${isPartial ? "rgba(239,68,68,0.2)" : "rgba(16,185,129,0.2)"}`, backdropFilter: "blur(20px)" }}>
                 <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent" />
-                <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 200, damping: 15 }} className="inline-flex mb-6"><div className="h-16 w-16 rounded-full flex items-center justify-center" style={{ background: "rgba(16, 185, 129, 0.15)" }}><Check className="h-8 w-8 text-accent-emerald" /></div></motion.div>
-                <h3 className="font-display text-2xl font-semibold text-text-primary mb-2">Flashcards Saved!</h3>
-                <p className="text-text-secondary mb-2">Your {previewCards.length} cards have been saved to your library.</p>
-                {usedOfflineFallback && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 p-4 rounded-xl flex items-center gap-3 justify-center" style={{ background: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.2)" }}><WifiOff className="h-5 w-5 text-accent-amber shrink-0" /><p className="text-sm text-accent-amber">Generated using offline mode. For AI-powered cards, please check your API key configuration.</p></motion.div>}
+                <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 200, damping: 15 }} className="inline-flex mb-6"><div className="h-16 w-16 rounded-full flex items-center justify-center" style={{ background: isPartial ? "rgba(239,68,68,0.15)" : "rgba(16,185,129,0.15)" }}><AlertCircle className="h-8 w-8" style={{ color: isPartial ? "#ef4444" : "#10b981" }} /></div></motion.div>
+                <h3 className="font-display text-2xl font-semibold text-text-primary mb-2">{isPartial ? "Cards Generated (Save Failed)" : "Flashcards Saved!"}</h3>
+                <p className="text-text-secondary mb-2">Your {previewCards.length} cards have been {isPartial ? "generated but failed to save" : "saved to your library"}.</p>
+                {isPartial && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 p-4 rounded-xl flex items-center gap-3 justify-center" style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)" }}><AlertCircle className="h-5 w-5 text-red-400 shrink-0" /><p className="text-sm text-red-400">There was an error saving to the database. Please try again or refresh the page.</p></motion.div>}
+                {usedOfflineFallback && !isPartial && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 p-4 rounded-xl flex items-center gap-3 justify-center" style={{ background: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.2)" }}><WifiOff className="h-5 w-5 text-accent-amber shrink-0" /><p className="text-sm text-accent-amber">Generated using offline mode. For AI-powered cards, please check your API key configuration.</p></motion.div>}
                 <div className="flex justify-center gap-3">
-                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => (window.location.href = `/deck/${savedDeckId}`)} className="px-6 py-3 rounded-xl text-[var(--text-on-accent)] font-medium flex items-center gap-2" style={{ background: "linear-gradient(135deg, var(--accent-green), var(--accent-blue))" }}><Eye className="h-5 w-5" /> View in Library</motion.button>
+                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={isPartial ? undefined : () => (window.location.href = `/deck/${savedDeckId}`)} disabled={isPartial} aria-disabled={isPartial} className="px-6 py-3 rounded-xl text-[var(--text-on-accent)] font-medium flex items-center gap-2 cursor-not-allowed" style={{ background: isPartial ? "var(--bg-elevated)" : "linear-gradient(135deg, var(--accent-green), var(--accent-blue))", border: isPartial ? "1px solid var(--glass-border-light)" : "none", color: isPartial ? "var(--text-primary)" : "var(--text-on-accent)" }}><Eye className="h-5 w-5" /> View in Library</motion.button>
                   <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleDeckReset} className="px-6 py-3 rounded-xl font-medium flex items-center gap-2" style={{ background: "var(--bg-elevated)", border: "1px solid var(--glass-border-light)", color: "var(--text-primary)" }}><Plus className="h-5 w-5" /> Create Another</motion.button>
                 </div>
               </motion.div>
@@ -659,14 +750,15 @@ export default function Generate() {
             )}
 
             {deckStep === "saved" && (
-              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="rounded-2xl p-8 text-center relative overflow-hidden" style={{ background: "var(--glass-card-bg)", border: "1px solid rgba(139, 92, 246, 0.2)", backdropFilter: "blur(20px)" }}>
+              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="rounded-2xl p-8 text-center relative overflow-hidden" style={{ background: isPartial ? "rgba(239,68,68,0.08)" : "var(--glass-card-bg)", border: `1px solid ${isPartial ? "rgba(239,68,68,0.2)" : "rgba(139, 92, 246, 0.2)"}`, backdropFilter: "blur(20px)" }}>
                 <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent" />
-                <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 200, damping: 15 }} className="inline-flex mb-6"><div className="h-16 w-16 rounded-full flex items-center justify-center" style={{ background: "rgba(139, 92, 246, 0.15)" }}><Check className="h-8 w-8 text-accent-purple" /></div></motion.div>
-                <h3 className="font-display text-2xl font-semibold text-text-primary mb-2">Question Bank Saved!</h3>
-                <p className="text-text-secondary mb-2">Your {previewCards.length} questions have been saved to your library.</p>
-                {usedOfflineFallback && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 p-4 rounded-xl flex items-center gap-3 justify-center" style={{ background: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.2)" }}><WifiOff className="h-5 w-5 text-accent-amber shrink-0" /><p className="text-sm text-accent-amber">Generated using offline mode. For AI-powered questions, please check your API key configuration.</p></motion.div>}
+                <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 200, damping: 15 }} className="inline-flex mb-6"><div className="h-16 w-16 rounded-full flex items-center justify-center" style={{ background: isPartial ? "rgba(239,68,68,0.15)" : "rgba(139, 92, 246, 0.15)" }}><AlertCircle className="h-8 w-8" style={{ color: isPartial ? "#ef4444" : "#8b5cf6" }} /></div></motion.div>
+                <h3 className="font-display text-2xl font-semibold text-text-primary mb-2">{isPartial ? "Questions Generated (Save Failed)" : "Question Bank Saved!"}</h3>
+                <p className="text-text-secondary mb-2">Your {previewCards.length} questions have been {isPartial ? "generated but failed to save" : "saved to your library"}.</p>
+                {isPartial && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 p-4 rounded-xl flex items-center gap-3 justify-center" style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)" }}><AlertCircle className="h-5 w-5 text-red-400 shrink-0" /><p className="text-sm text-red-400">There was an error saving to the database. Please try again or refresh the page.</p></motion.div>}
+                {usedOfflineFallback && !isPartial && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 p-4 rounded-xl flex items-center gap-3 justify-center" style={{ background: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.2)" }}><WifiOff className="h-5 w-5 text-accent-amber shrink-0" /><p className="text-sm text-accent-amber">Generated using offline mode. For AI-powered questions, please check your API key configuration.</p></motion.div>}
                 <div className="flex justify-center gap-3">
-                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => (window.location.href = `/deck/${savedDeckId}`)} className="px-6 py-3 rounded-xl text-[var(--text-on-accent)] font-medium flex items-center gap-2" style={{ background: "linear-gradient(135deg, var(--accent-purple), var(--accent-violet))" }}><Eye className="h-5 w-5" /> View in Library</motion.button>
+                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={isPartial ? undefined : () => (window.location.href = `/deck/${savedDeckId}`)} disabled={isPartial} aria-disabled={isPartial} className="px-6 py-3 rounded-xl text-[var(--text-on-accent)] font-medium flex items-center gap-2 cursor-not-allowed" style={{ background: isPartial ? "var(--bg-elevated)" : "linear-gradient(135deg, var(--accent-purple), var(--accent-violet))", border: isPartial ? "1px solid var(--glass-border-light)" : "none", color: isPartial ? "var(--text-primary)" : "var(--text-on-accent)" }}><Eye className="h-5 w-5" /> View in Library</motion.button>
                   <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleDeckReset} className="px-6 py-3 rounded-xl font-medium flex items-center gap-2" style={{ background: "var(--bg-elevated)", border: "1px solid var(--glass-border-light)", color: "var(--text-primary)" }}><Plus className="h-5 w-5" /> Create Another</motion.button>
                 </div>
               </motion.div>

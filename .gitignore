@@ -1,6 +1,7 @@
 node_modules/
 .dev.vars
 .wrangler/
+dist/
 public/
 .tunnel-state.json
 .env

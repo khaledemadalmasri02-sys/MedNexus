@@ -210,7 +210,10 @@ deckRoutes.post("/decks/merge", validate(mergeDecksSchema), async (c) => {
     await getDb(c).insert(cards).values(sourceCards.map((card) => ({
       deckId: mergedDeck.id, front: card.front, back: card.back, tags: card.tags,
       cardType: card.cardType, choices: card.choices, correctIndex: card.correctIndex,
-      pageNumber: card.pageNumber, image: card.image, createdAt: new Date(), updatedAt: new Date(),
+      pageNumber: card.pageNumber, image: card.image,
+      subject: card.subject, organSystem: card.organSystem, difficulty: card.difficulty,
+      highYieldScore: card.highYieldScore ?? 0.5,
+      createdAt: new Date(), updatedAt: new Date(),
     })));
     if (deleteOriginals) await getDb(c).delete(decks).where(inArray(decks.id, deckIds));
     return c.json({ ...mergedDeck, cardCount: sourceCards.length, mergedDeckCount: deckIds.length, deletedOriginals: deleteOriginals }, 201);

@@ -130,7 +130,7 @@ Return ONLY valid JSON, no markdown or explanation.`;
       const aiResponse = await ai.complete([
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
-      ], { maxTokens: 8192 });
+      ], { maxTokens: 15000 });
 
       const jsonMatch = aiResponse.match(/\[[\s\S]*?\]/);
       if (jsonMatch) {

@@ -163,6 +163,11 @@ export class OfflineGenerator {
         }
       }
     }
+    if (result.length === 0) {
+      const rawText = text.replace(/\s+/g, " ").trim().slice(0, 500);
+      const fallbackText = rawText.length > 20 ? rawText : (text.replace(/\s+/g, " ").trim() || "Generated content");
+      result.push({ front: `Summarize: ${fallbackText.substring(0, 80)}...`, back: fallbackText, tags: ["generated"] });
+    }
     return result.slice(0, count);
   }
 
@@ -186,6 +191,17 @@ export class OfflineGenerator {
         const question = generateMCQFromContent(sentence, keyWord, keyTerms);
         if (question && !result.some((q) => q.back === question.back)) result.push(question);
       }
+    }
+    if (result.length === 0) {
+      const rawText = text.replace(/\s+/g, " ").trim().slice(0, 500);
+      const fallbackText = rawText.length > 20 ? rawText : (text.replace(/\s+/g, " ").trim() || "Generated content");
+      result.push({
+        front: "Which statement is supported by the text?",
+        back: fallbackText,
+        choices: [fallbackText, "None of the above", "Partially correct", "Incorrect"],
+        correctIndex: 0,
+        explanation: fallbackText,
+      });
     }
     return result.slice(0, count);
   }

@@ -247,8 +247,8 @@ generateRoutes.post("/generate", validate(generateSchema), async (c) => {
           const card = !isQuestion ? (item as GeneratedCard) : null;
           return {
             deckId: deck.id,
-            front: item.front,
-            back: item.back,
+            front: item.front.slice(0, 10000),
+            back: item.back.slice(0, 10000),
             tags: card?.tags?.join(",") || null,
             cardType: isQuestion ? "mcq" : "basic",
             choices: question?.choices ? JSON.stringify(question.choices) : null,
@@ -412,6 +412,8 @@ generateRoutes.post("/generate/stream", async (c) => {
               organSystem: null,
               difficulty: null,
               highYieldScore: 0.5,
+              source: "heuristic",
+              aiGenerated: false,
               createdAt: new Date(),
               updatedAt: new Date(),
             });
@@ -431,8 +433,8 @@ generateRoutes.post("/generate/stream", async (c) => {
                 const card = event.data as GeneratedCard;
                 cardsToInsert.push({
                   deckId: deck.id,
-                  front: card.front,
-                  back: card.back,
+                  front: card.front.slice(0, 10000),
+                  back: card.back.slice(0, 10000),
                   tags: card.tags?.join(",") || null,
                   cardType: "basic",
                   choices: null,
@@ -463,8 +465,8 @@ generateRoutes.post("/generate/stream", async (c) => {
                 const card = event.data as GeneratedCard;
                 cardsToInsert.push({
                   deckId: deck.id,
-                  front: card.front,
-                  back: card.back,
+                  front: card.front.slice(0, 10000),
+                  back: card.back.slice(0, 10000),
                   tags: card.tags?.join(",") || null,
                   cardType: "basic",
                   choices: null,
@@ -491,26 +493,26 @@ generateRoutes.post("/generate/stream", async (c) => {
             const isQuestion = "choices" in item;
             const question = isQuestion ? normalizeQbankItem(item as GeneratedQuestion) : null;
             const itemCard = item as GeneratedCard;
-              const validatedDifficulty = ["easy", "medium", "hard"].includes(itemCard.difficulty || "") ? itemCard.difficulty : null;
-              const validatedHighYieldScore = typeof itemCard.highYieldScore === "number" && !isNaN(itemCard.highYieldScore)
-                ? Math.max(0, Math.min(1, itemCard.highYieldScore))
-                : 0.5;
-              const cardItem = {
-                deckId: deck.id,
-                front: item.front,
-                back: item.back,
-                tags: itemCard.tags?.join(",") || null,
-                cardType: isQuestion ? "mcq" : "basic",
-                choices: question?.choices ? JSON.stringify(question.choices) : null,
-                correctIndex: question?.correctIndex ?? null,
-                subject: itemCard.subject ?? null,
-                organSystem: itemCard.organSystem ?? null,
-                difficulty: validatedDifficulty,
-                highYieldScore: validatedHighYieldScore,
-                source: "heuristic",
-                aiGenerated: false,
-                createdAt: new Date(),
-                updatedAt: new Date(),
+            const validatedDifficulty = ["easy", "medium", "hard"].includes(itemCard.difficulty || "") ? itemCard.difficulty : null;
+            const validatedHighYieldScore = typeof itemCard.highYieldScore === "number" && !isNaN(itemCard.highYieldScore)
+              ? Math.max(0, Math.min(1, itemCard.highYieldScore))
+              : 0.5;
+            const cardItem = {
+              deckId: deck.id,
+              front: item.front.slice(0, 10000),
+              back: item.back.slice(0, 10000),
+              tags: itemCard.tags?.join(",") || null,
+              cardType: isQuestion ? "mcq" : "basic",
+              choices: question?.choices ? JSON.stringify(question.choices) : null,
+              correctIndex: question?.correctIndex ?? null,
+              subject: itemCard.subject ?? null,
+              organSystem: itemCard.organSystem ?? null,
+              difficulty: validatedDifficulty,
+              highYieldScore: validatedHighYieldScore,
+              source: "heuristic",
+              aiGenerated: false,
+              createdAt: new Date(),
+              updatedAt: new Date(),
             };
             cardsToInsert.push(cardItem);
             send("card", {
@@ -527,19 +529,34 @@ generateRoutes.post("/generate/stream", async (c) => {
         
         let dbInsertSucceeded = true;
         let createdCards: any[] = [];
-        try {
-          createdCards = await insertBatched(getDb(c), cards, cardsToInsert);
-        } catch (dbErr) {
-          dbInsertSucceeded = false;
-          const errMsg = (dbErr as Error)?.message || String(dbErr);
-          logger.error({ err: errMsg, cardCount: cardsToInsert.length, deckId: deck.id }, "Database insert failed, cards already streamed to client");
-          await captureGenerationError(getDb(c), dbErr as Error, {
-            userId,
-            operation: "generate:stream:db-insert",
-            model: "unknown",
-            inputText: `deckId: ${deck.id}, cardCount: ${cardsToInsert.length}`,
-            extra: { error: errMsg },
-          });
+        
+        if (cardsToInsert.length > 0) {
+          const batches: any[][] = [];
+          const batchSize = 3;
+          for (let i = 0; i < cardsToInsert.length; i += batchSize) {
+            batches.push(cardsToInsert.slice(i, i + batchSize));
+          }
+          
+          for (let i = 0; i < batches.length; i++) {
+            send("status", { message: `Inserting batch ${i + 1}/${batches.length}...` });
+            try {
+              const inserted = await insertBatched(getDb(c), cards, batches[i], batchSize);
+              createdCards.push(...inserted);
+            } catch (dbErr) {
+              dbInsertSucceeded = false;
+              const errMsg = (dbErr as Error)?.message || String(dbErr);
+              logger.error({ err: errMsg, cardCount: cardsToInsert.length, deckId: deck.id }, "Database insert failed, cards already streamed to client");
+              await captureGenerationError(getDb(c), dbErr as Error, {
+                userId,
+                operation: "generate:stream:db-insert",
+                model: "unknown",
+                inputText: `deckId: ${deck.id}, cardCount: ${cardsToInsert.length}`,
+                extra: { error: errMsg },
+              });
+              closeWhenReady();
+              return;
+            }
+          }
         }
         
         const duration = Date.now() - startTime;

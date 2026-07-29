@@ -45,6 +45,56 @@
       "filename": "0004_library_decks.sql",
       "hash": "b3c4d5e6f70819203a4b5c6d7e8f90123456789abcdef0123456789abcdef0123",
       "breakpoints": false
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784823000000,
+      "tag": "0005_knowledge_graph_migration",
+      "folderMillis": 1784823000000,
+      "filename": "0005_knowledge_graph_migration.sql",
+      "hash": "f1e2d3c4b5a697867564534231201987654321fedcba0987654321fedcba0987",
+      "breakpoints": false
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1784824000000,
+      "tag": "0006_fix_highyieldscore_type",
+      "folderMillis": 1784824000000,
+      "filename": "0006_fix_highyieldscore_type.sql",
+      "hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0124",
+      "breakpoints": false
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1784825000000,
+      "tag": "0007_fix_card_metadata_type",
+      "folderMillis": 1784825000000,
+      "filename": "0007_fix_card_metadata_type.sql",
+      "hash": "b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0125",
+      "breakpoints": false
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1784963570873,
+      "tag": "0008_fix_ease_factor_type",
+      "folderMillis": 1784963570873,
+      "filename": "0008_fix_ease_factor_type.sql",
+      "hash": "0aa51838e128dee0a364b8b1387fabfcec0f674a8ed20e32ccab8099058fe79f",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1785050000000,
+      "tag": "0009_osce_station_database",
+      "folderMillis": 1785050000000,
+      "filename": "0009_osce_station_database.sql",
+      "hash": "231a47996ecab5e65f417c44c566313f74afa883e0613e7354094db8cf09aa29",
+      "breakpoints": false
     }
   ]
 }

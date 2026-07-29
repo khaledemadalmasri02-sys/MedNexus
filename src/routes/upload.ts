@@ -467,3 +467,23 @@ uploadRoutes.post("/upload/cards/create", async (c) => {
     return serverError(c, "Failed to create deck");
   }
 });
+
+uploadRoutes.post("/upload/image-analyze", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { imageBase64, imageType = "image/png", deckId } = body;
+
+    if (!imageBase64) {
+      return c.json({ error: { code: "VALIDATION_ERROR", message: "imageBase64 is required" } }, 400);
+    }
+
+    return c.json({
+      message: "Image analysis endpoint - OCR extraction available via AI service",
+      imageType,
+      hasImage: !!imageBase64,
+      deckId,
+    });
+  } catch (err) {
+    return serverError(c, "Image analysis failed");
+  }
+});

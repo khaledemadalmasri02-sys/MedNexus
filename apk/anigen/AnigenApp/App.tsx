@@ -12,16 +12,14 @@ import {
   TouchableOpacity,
   StatusBar,
   BackHandler,
-  Alert,
   Dimensions,
 } from 'react-native';
-import { WebView } from 'react-native-webview';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { WebView, WebViewNavigation } from 'react-native-webview';
 
 const API_BASE_URL = 'http://192.168.100.225:5173';
 
 export default function App() {
-  const webViewRef = useRef<WebView>(null);
+  const webViewRef = useRef<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [canGoBack, setCanGoBack] = useState(false);
@@ -94,7 +92,7 @@ export default function App() {
             true;
           `);
         }}
-        onNavigationStateChange={(navState) => setCanGoBack(navState.canGoBack)}
+        onNavigationStateChange={(navState: WebViewNavigation) => setCanGoBack(navState.canGoBack)}
         javaScriptEnabled
         domStorageEnabled
         sharedCookiesEnabled

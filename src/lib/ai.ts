@@ -21,6 +21,54 @@ export interface GeneratedCard {
   front: string;
   back: string;
   tags?: string[];
+  cardType?: string;
+  choices?: string[];
+  correctIndex?: number;
+  subject?: string;
+  organSystem?: string;
+  difficulty?: string;
+  highYieldScore?: number;
+}
+
+export interface GeneratedClozeCard {
+  front: string;
+  back: string;
+  cloze: string;
+  tags?: string[];
+  subject?: string;
+  organSystem?: string;
+  difficulty?: string;
+}
+
+export interface GeneratedVignette {
+  front: string;
+  back: string;
+  vignette: string;
+  tags?: string[];
+  subject?: string;
+  organSystem?: string;
+  difficulty?: string;
+}
+
+export interface GeneratedCompareContrast {
+  front: string;
+  back: string;
+  compare: string[];
+  contrast: string[];
+  tags?: string[];
+  subject?: string;
+  organSystem?: string;
+  difficulty?: string;
+}
+
+export interface GeneratedMnemonic {
+  front: string;
+  back: string;
+  mnemonic: string;
+  explanation: string;
+  tags?: string[];
+  subject?: string;
+  difficulty?: string;
 }
 
 export interface GeneratedQuestion {
@@ -64,7 +112,7 @@ function getApiBaseUrl(model: string, config: AppConfig): string {
     case "local":
     case "lmstudio":
     case "ollama": {
-      const base = (config.LOCAL_AI_URL || "http://192.168.100.205:1234/v1").replace(/\/+$/, "");
+      const base = (config.LOCAL_AI_URL || "http://192.168.100.99:1234/v1").replace(/\/+$/, "");
       return base.startsWith("http") ? base : `http://${base}`;
     }
     case "openrouter":
@@ -307,6 +355,7 @@ const MODE_PROMPTS: Record<string, string> = {
   mnemonic: "Create helpful mnemonics and memory aids for this topic.",
   clinical: "Focus on clinical relevance, presentation, diagnosis, and management.",
   testtrap: "Highlight common exam pitfalls, trick questions, and frequent misconceptions. Use ## headings, bullet points, and **bold** for key terms.",
+  entity_extraction: `Extract medical entities from clinical text. Identify diseases, symptoms, signs, diagnoses, treatments, medications, anatomy, physiology, pathology, pharmacology, microbiology, infections, procedures, tests, findings, labs, imaging, vaccines, nutrition, genetics, biochemistry, toxicology, surgeries, emergency topics, psychiatric conditions, pediatric topics, obstetrics/gynecology, geriatrics, dermatology, cardiology, neurology, gastroenterology, endocrinology, urology, orthopedics, ENT, ophthalmology, hematology, oncology, rheumatology, nephrology, pulmonology, cardiothoracic, vascular, transplant, allergy, and immunology. Return a JSON array with name, type, description, and confidence fields.`,
 };
 
 export type ExplainMode = "full" | "revision" | "osce" | "brief" | "mnemonic" | "clinical" | "testtrap";
@@ -353,7 +402,7 @@ export class AIService {
         model: getFullModelName(model),
         messages,
         temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 8192,
+        max_tokens: options.maxTokens ?? 15000,
         // Qwen3 / reasoning models put the answer in `reasoning_content` and
         // leave `content` empty unless thinking is disabled. Disable it so the
         // OpenAI-style completion we parse comes back in `message.content`.
@@ -376,9 +425,12 @@ export class AIService {
       throw new Error(`AI API error: ${response.status} - ${error}`);
     }
     const data = (await response.json().catch(() => null)) as
-      | { choices?: Array<{ message?: { content?: string } }> }
+      | { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
       | null;
-    const content = data?.choices?.[0]?.message?.content ?? "";
+    let content = data?.choices?.[0]?.message?.content ?? "";
+    if (!content.trim()) {
+      content = data?.choices?.[0]?.message?.reasoning_content ?? "";
+    }
     if (!content.trim()) {
       throw new Error("Invalid response format from AI: empty completion (no JSON content)");
     }
@@ -428,11 +480,12 @@ export class AIService {
         model: getFullModelName(model),
         messages,
         temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 8192,
+        max_tokens: options.maxTokens ?? 15000,
         stream: true,
         enable_thinking: false,
         reasoning_format: "none",
       }),
+      signal: options.signal,
     }, `stream:${model}`, provider, this.config.LOCAL_AI_TIMEOUT_MS);
     if (!response.ok) {
       const error = await response.text();
@@ -654,7 +707,7 @@ Answer/Back: ${this.sanitizePromptInput(back)}`;
       if (m) {
         const header = m[1].trim().toUpperCase();
         const matched = (Object.entries(AIService.ALL_MODE_HEADERS) as [ExplainMode, string][])
-          .find(([, h]) => header === h || header.startsWith(h) || header.includes(h.split(" ")[0]));
+          .find(([, h]) => header === h || header.startsWith(h + ":") || header === h + " -" || header === h + " —");
         if (matched) {
           flush();
           current = matched[0];
@@ -688,15 +741,25 @@ Answer/Back: ${this.sanitizePromptInput(back)}`;
   // card index used in the prompt.
   async explainCardsBatch(cards: { front: string; back: string }[], options: GenerateOptions = {}): Promise<Record<number, Record<ExplainMode, string>>> {
     const model = options.model || this.config.AI_EXPLAIN_MODEL;
-    const headerList = (Object.values(AIService.ALL_MODE_HEADERS) as string[]).join(", ");
     const cardLines = cards.map((c, i) =>
       `CARD ${i + 1}\nFront: ${this.sanitizePromptInput(c.front)}\nBack: ${this.sanitizePromptInput(c.back)}`
     ).join("\n\n");
 
     const systemPrompt = `You are an expert medical educator creating study materials for medical students.
-You will be given several flashcards. For EACH card, generate ALL of the following explanation modes, in this exact order, each starting with its OWN level-2 markdown header (exactly: ${headerList}).
+You will be given several flashcards. For EACH card, generate ALL 7 explanation modes in this exact order:
+
+1. ## FULL EXPLANATION
+2. ## REVISION
+3. ## OSCE
+4. ## BRIEF
+5. ## MNEMONIC
+6. ## CLINICAL
+7. ## TESTTRAP
+
 Use rich Markdown (## sub-sections, bullet points, **bold** key terms, > blockquotes for clinical pearls, pipe tables where useful) inside each section.
-Separate each card with exactly this line: === CARD <n> === (where <n> is the 1-based card number).
+
+After each card's 7 sections, separate it from the next card with exactly: === CARD <n> === (where <n> is the 1-based card number).
+
 Do NOT add any commentary before the first card or after the last.`;
     const userPrompt = `Generate explanations for every card below:\n\n${cardLines}\n\nReturn all cards now.`;
 
@@ -704,7 +767,25 @@ Do NOT add any commentary before the first card or after the last.`;
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ], { ...options, model, temperature: 0.7, maxTokens: 8000 });
-    return this.parseBatch(raw);
+    
+    const parsed = this.parseBatch(raw);
+    
+    // Validate that we got actual content - fallback to single-card generation if batch parsing failed
+    const hasValidContent = Object.values(parsed).some((modes) =>
+      Object.values(modes).some((content) => content && content.trim().length > 50)
+    );
+    
+    if (!hasValidContent && cards.length > 0) {
+      logger.warn({ cardCount: cards.length }, "Batch explanation parsing returned empty results, falling back to single-card generation");
+      const fallback: Record<number, Record<ExplainMode, string>> = {};
+      for (let i = 0; i < cards.length; i++) {
+        const singleResult = await this.explainCard(cards[i].front, cards[i].back, "full", { ...options, model });
+        fallback[i + 1] = { full: singleResult, revision: "", osce: "", brief: "", mnemonic: "", clinical: "", testtrap: "" };
+      }
+      return fallback;
+    }
+    
+    return parsed;
   }
 
   async *streamExplainCard(front: string, back: string, mode: ExplainMode = "full", options: GenerateOptions = {}): AsyncGenerator<string> {
@@ -805,6 +886,93 @@ Return format: [{"front":"?","back":"?","choices":["A","B","C","D"],"correctInde
       yield { type: "card", data: question };
     }
     yield { type: "progress", data: { message: `Generated ${questions.length} questions` } };
+  }
+
+  async generateClozeCards(text: string, cardCount = 10, options: GenerateOptions = {}): Promise<GeneratedClozeCard[]> {
+    const model = options.model || this.config.AI_TEXT_MODEL;
+    const systemPrompt = `You are an expert flashcard creator specializing in cloze deletion cards for medical education. Generate ${cardCount} high-quality cloze deletion flashcards from the provided text.
+
+Cloze cards use a fill-in-the-blank format with {{c1::answer}} syntax for the deleted portion.
+
+Rules:
+- Each card should test ONE key concept
+- Front: A question or prompt with a blank (use [BLANK] or ___ as placeholder)
+- Back: The complete answer with the cloze marked as {{c1::answer}}
+- The cloze should test recall of a specific fact, definition, or concept
+- Include relevant tags as an array of strings
+- Each card must have NON-EMPTY front and back after trimming
+- Return ONLY a valid JSON array - nothing else, no code fences, no explanations
+
+Return format: [{"front":"What is the treatment for [BLANK]?","back":"{{c1::antibiotics}}","tags":[]}]`;
+    const response = await this.complete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Generate ${cardCount} cloze cards from this text:\n\n${this.sanitizePromptInput(text)}` },
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 });
+    return parseJsonArray<GeneratedClozeCard>(response);
+  }
+
+  async generateVignette(text: string, cardCount = 10, options: GenerateOptions = {}): Promise<GeneratedVignette[]> {
+    const model = options.model || this.config.AI_TEXT_MODEL;
+    const systemPrompt = `You are an expert medical educator creating clinical vignette-based flashcards. Generate ${cardCount} high-quality vignette cards from the provided text.
+
+Vignette cards present a clinical scenario and ask the learner to diagnose or determine the next step.
+
+Rules:
+- Front: A clinical vignette (brief patient scenario) with a specific question
+- Back: The diagnosis, answer, or next step
+- Include relevant tags as an array of strings
+- Each card must have NON-EMPTY front and back after trimming
+- Vignettes should be realistic and clinically relevant
+- Return ONLY a valid JSON array - nothing else, no code fences, no explanations
+
+Return format: [{"front":"A 45-year-old man presents with... What is the most likely diagnosis?","back":"Myocardial infarction","tags":[]}]`;
+    const response = await this.complete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Generate ${cardCount} vignette cards from this text:\n\n${this.sanitizePromptInput(text)}` },
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 });
+    return parseJsonArray<GeneratedVignette>(response);
+  }
+
+  async generateCompareContrast(text: string, cardCount = 10, options: GenerateOptions = {}): Promise<GeneratedCompareContrast[]> {
+    const model = options.model || this.config.AI_TEXT_MODEL;
+    const systemPrompt = `You are an expert medical educator creating compare/contrast flashcards. Generate ${cardCount} high-quality compare/contrast cards from the provided text.
+
+Compare/contrast cards highlight differences between similar medical concepts.
+
+Rules:
+- Front: A question asking to compare or contrast two or more concepts
+- Back: A list of differences (as "contrast" array) and similarities (as "compare" array)
+- Include relevant tags as an array of strings
+- Each card must have NON-EMPTY front and back after trimming
+- Return ONLY a valid JSON array - nothing else, no code fences, no explanations
+
+Return format: [{"front":"Compare the pathophysiology of myocardial infarction and cardiac arrhythmia:","back":{"compare":["Both involve heart dysfunction","Both are acute conditions"],"contrast":["MI involves myocyte necrosis","Arrhythmia involves electrical instability"]},"tags":[]}]`;
+    const response = await this.complete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Generate ${cardCount} compare/contrast cards from this text:\n\n${this.sanitizePromptInput(text)}` },
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 });
+    return parseJsonArray<GeneratedCompareContrast>(response);
+  }
+
+  async generateMnemonics(text: string, cardCount = 10, options: GenerateOptions = {}): Promise<GeneratedMnemonic[]> {
+    const model = options.model || this.config.AI_TEXT_MODEL;
+    const systemPrompt = `You are an expert medical educator creating memory aid flashcards. Generate ${cardCount} high-quality mnemonic cards from the provided text.
+
+Mnemonic cards use memory techniques to help learners remember key facts.
+
+Rules:
+- Front: A question or prompt for what to remember
+- Back: A mnemonic, acronym, or memory aid plus a brief explanation of why it works
+- Include relevant tags as an array of strings
+- Each card must have NON-EMPTY front and back after trimming
+- Return ONLY a valid JSON array - nothing else, no code fences, no explanations
+
+Return format: [{"front":"What is a mnemonic for the cranial nerves?","back":{"mnemonic":"Oh, Oh, Oh, To Touch And Feel Very Green Vegetables, Ah!","explanation":"Each word's first letter corresponds to a cranial nerve (I-XII)"},"tags":[]}]`;
+    const response = await this.complete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Generate ${cardCount} mnemonic cards from this text:\n\n${this.sanitizePromptInput(text)}` },
+    ], { ...options, model, temperature: 0.5, maxTokens: 4000 });
+    return parseJsonArray<GeneratedMnemonic>(response);
   }
 }
 

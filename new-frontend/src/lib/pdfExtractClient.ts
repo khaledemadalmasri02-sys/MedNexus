@@ -29,18 +29,23 @@ export async function extractPdfTextClient(
   const lines: string[] = [];
 
   let prevY: number | null = null;
+  interface PdfTextItem {
+    str: string;
+    transform?: number[];
+    hasEOL?: boolean;
+  }
   for (let i = 1; i <= numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
     let line = "";
-    for (const item of content.items as Array<Record<string, any>>) {
+    for (const item of content.items as PdfTextItem[]) {
       if (!("str" in item)) continue;
       const y = item.transform ? (item.transform[5] as number) : null;
       if (prevY !== null && y !== null && Math.abs(y - prevY) > 2 && line) {
         lines.push(line.trim());
         line = "";
       }
-      line += item.str as string;
+      line += item.str;
       if (item.hasEOL) {
         lines.push(line.trim());
         line = "";

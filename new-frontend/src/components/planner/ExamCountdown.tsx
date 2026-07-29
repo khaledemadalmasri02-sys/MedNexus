@@ -1,10 +1,10 @@
 import { motion } from "framer-motion";
 import { GraduationCap, Clock } from "lucide-react";
 import type { StudyExam } from "../../lib/api";
+import { useMemo, useEffect, useState } from "react";
 
-function diffParts(examDate: string) {
+function diffParts(examDate: string, now: number) {
   const target = new Date(examDate).getTime();
-  const now = Date.now();
   let diff = Math.max(0, target - now);
   const days = Math.floor(diff / 86400000);
   diff -= days * 86400000;
@@ -15,12 +15,23 @@ function diffParts(examDate: string) {
 }
 
 export default function ExamCountdown({ exams }: { exams: StudyExam[] }) {
-  if (exams.length === 0) return null;
-  const upcoming = [...exams]
-    .filter((e) => new Date(e.examDate).getTime() > Date.now())
-    .sort((a, b) => new Date(a.examDate).getTime() - new Date(b.examDate).getTime())[0];
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  const upcoming = useMemo(() => {
+    return [...exams]
+      .filter((e) => new Date(e.examDate).getTime() > now)
+      .sort((a, b) => new Date(a.examDate).getTime() - new Date(b.examDate).getTime())[0];
+  }, [exams, now]);
+
   const next = upcoming || exams[0];
-  const { days, hours, minutes, passed } = diffParts(next.examDate);
+  const { days, hours, minutes, passed } = diffParts(next.examDate, now);
+
+  if (exams.length === 0) return null;
 
   return (
     <motion.div

@@ -18,7 +18,7 @@ function getDefaultSettings(userId: string) {
     density: "comfortable",
     soundEnabled: false,
     streakFreezeUsedAt: null,
-    theme: "dark",
+    theme: "clinical-white",
     animationsEnabled: true,
     fontSize: "medium",
     defaultStyle: "modern",

@@ -200,6 +200,7 @@ studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) =>
             aiBack: card.back,
             aiGenerated: true,
             source: "ai" as const,
+            highYieldScore: 0.5,
           };
         }
         return {
@@ -210,6 +211,7 @@ studypilotRoutes.post("/studypilot/ingest", validate(ingestSchema), async (c) =>
           tags: buildTags(card),
           aiGenerated: false,
           source: "heuristic" as const,
+          highYieldScore: 0.5,
         };
       });
       if (values.length) {

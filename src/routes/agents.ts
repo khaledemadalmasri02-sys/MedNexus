@@ -178,6 +178,11 @@ async function searchKnowledge(db: any, agentId: string, query: string, limit = 
 
 // POST /api/agents/chat
 agentRoutes.post("/agents/chat", async (c) => {
+  const accept = c.req.header("accept") || "";
+  if (!accept.includes("text/event-stream")) {
+    return c.json({ error: { code: "VALIDATION_ERROR", message: "Client must accept text/event-stream" } }, 406);
+  }
+
   const userId = getUserId(c);
   if (!userId) return unauthorized(c);
   const db = getDb(c);
@@ -279,7 +284,7 @@ agentRoutes.post("/agents/chat", async (c) => {
 
 You are NOT a general support chatbot. You are a medical education tutor. Always answer medical and educational questions helpfully and thoroughly.${modeInstruction}${deckContext}${cardContext}`;
 
-    const maxTokens = chatMode === "brief" ? 1024 : 8192;
+    const maxTokens = chatMode === "brief" ? 1024 : 15000;
 
     const knowledgeEntries = await searchKnowledge(db, "study-buddy", message, 3);
     const knowledgeContext = knowledgeEntries.length > 0

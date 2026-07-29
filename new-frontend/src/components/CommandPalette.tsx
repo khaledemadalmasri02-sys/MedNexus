@@ -3,8 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import {
   Search, LayoutDashboard, Library, Sparkles, History, CalendarDays,
-  Plus, Play, Settings, Bot, Brain, Stethoscope,
-  FileText, Lightbulb, TrendingUp, Camera, Mic, Users, Command, ArrowRight,
+  Plus, Play, Settings, Bot, Command, ArrowRight,
 } from "lucide-react";
 import Fuse from "fuse.js";
 import * as api from "../lib/api";
@@ -36,14 +35,6 @@ const ACTION_COMMANDS: Omit<CommandItem, "action">[] = [
 
 const AGENT_COMMANDS: Omit<CommandItem, "action">[] = [
   { id: "agent-chat", label: "Study Buddy", description: "Chat with AI tutor", icon: Bot, category: "agent", keywords: ["chat", "tutor", "ask"] },
-  { id: "agent-review", label: "Smart Review", description: "AI-powered review", icon: Brain, category: "agent", keywords: ["review", "smart", "ai"] },
-  { id: "agent-exam", label: "Exam Simulator", description: "Practice exams", icon: Stethoscope, category: "agent", keywords: ["exam", "test", "quiz"] },
-  { id: "agent-summarize", label: "Summarizer", description: "Summarize notes", icon: FileText, category: "agent", keywords: ["summary", "notes", "condense"] },
-  { id: "agent-mnemonics", label: "Mnemonics", description: "Memory aids", icon: Lightbulb, category: "agent", keywords: ["memory", "tricks", "remember"] },
-  { id: "agent-coach", label: "Study Coach", description: "Personal coaching", icon: TrendingUp, category: "agent", keywords: ["coach", "guide", "help"] },
-  { id: "agent-image", label: "Image Analyzer", description: "Analyze medical images", icon: Camera, category: "agent", keywords: ["image", "photo", "scan"] },
-  { id: "agent-voice", label: "Voice Tutor", description: "Voice-based study", icon: Mic, category: "agent", keywords: ["voice", "audio", "speak"] },
-  { id: "agent-group", label: "Group Study", description: "Study with others", icon: Users, category: "agent", keywords: ["group", "multiplayer", "friends"] },
 ];
 
 export function CommandPalette() {
@@ -101,14 +92,6 @@ export function CommandPalette() {
       action: () => {
         const routeMap: Record<string, string> = {
           "agent-chat": "/chat",
-          "agent-review": "/smart-review",
-          "agent-exam": "/exam",
-          "agent-summarize": "/summarize",
-          "agent-mnemonics": "/mnemonics",
-          "agent-coach": "/coach",
-          "agent-image": "/image-analyze",
-          "agent-voice": "/voice-study",
-          "agent-group": "/group-study",
         };
         navigate(routeMap[item.id] || "/");
         setIsOpen(false);

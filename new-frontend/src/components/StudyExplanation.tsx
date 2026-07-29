@@ -103,12 +103,13 @@ function extractSections(markdown: string): string[] {
   return sections;
 }
 
-// Live writing hook - displays content letter by letter over 12 seconds
+// Live writing hook - displays content word by word with lively animation
 function useLiveWriting(content: string, durationMs: number = 12000, isPlaying: boolean = false) {
   const [displayedContent, setDisplayedContent] = useState('');
   const [isComplete, setIsComplete] = useState(false);
   const animationRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
+  const wordsRef = useRef<string[]>([]);
 
   useEffect(() => {
     if (!content || !isPlaying) {
@@ -117,30 +118,27 @@ function useLiveWriting(content: string, durationMs: number = 12000, isPlaying: 
       return;
     }
 
-    // If content is short (< 50 chars), show immediately
-    if (content.length < 50) {
+    wordsRef.current = content.split(/(?=\s)/);
+    const totalWords = wordsRef.current.length;
+    
+    if (totalWords === 0) {
       setDisplayedContent(content);
       setIsComplete(true);
       return;
     }
 
     startTimeRef.current = Date.now();
-    const totalChars = content.length;
+    const baseDuration = Math.max(3000, durationMs);
     
     const animate = () => {
       const elapsed = Date.now() - startTimeRef.current;
-      const progress = Math.min(elapsed / durationMs, 1);
-      
-      // Linear progress for consistent letter-by-letter reveal
-      const charsToShow = Math.floor(totalChars * progress);
-      
-      // Display content up to the current character count
-      setDisplayedContent(content.slice(0, charsToShow));
+      const progress = Math.min(elapsed / baseDuration, 1);
+      const wordsToShow = Math.floor(totalWords * progress);
+      setDisplayedContent(wordsRef.current.slice(0, wordsToShow).join(''));
       
       if (progress < 1) {
         animationRef.current = requestAnimationFrame(animate);
       } else {
-        // Ensure final content is complete
         setDisplayedContent(content);
         setIsComplete(true);
       }
@@ -238,7 +236,7 @@ export default function StudyExplanation({ front, back, isRevealed, cardId, expl
     } finally {
       setLoading(false);
     }
-  }, [front, back]);
+  }, [front, back, cardId]);
 
   const handleModeSelect = (modeConfig: ModeConfig) => {
     if (activeMode === modeConfig.id) {
@@ -262,8 +260,8 @@ export default function StudyExplanation({ front, back, isRevealed, cardId, expl
     ? (getExplanationContent(activeMode) || fetchedContent || '')
     : '';
   
-  // Apply live writing animation
-  const { displayedContent, isComplete } = useLiveWriting(rawContent, 6000, !!rawContent && !!activeMode);
+  // Apply live writing animation - word-by-word for more lively effect
+  const { displayedContent, isComplete } = useLiveWriting(rawContent, 8000, !!rawContent && !!activeMode);
   
   const sections = extractSections(rawContent);
 

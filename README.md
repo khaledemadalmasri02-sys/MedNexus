@@ -1,6 +1,6 @@
-# Professional API Server
+# MedNexus API Server
 
-A standalone, professional backend API server with AI-powered features and self-contained terminal functionality. This server is independent of any platform like Replit and can be deployed anywhere.
+A Cloudflare Workers-based API server with AI-powered features and self-contained terminal functionality. This server runs on the edge using Hono and D1 (SQLite).
 
 ## Features
 
@@ -23,56 +23,60 @@ A standalone, professional backend API server with AI-powered features and self-
 
 ## Tech Stack
 
-- **Runtime**: Node.js 20+
+- **Runtime**: Cloudflare Workers
 - **Language**: TypeScript
-- **Framework**: Express.js
-- **Database**: SQLite (via better-sqlite3 + Drizzle ORM)
-- **Logging**: Pino
+- **Framework**: Hono
+- **Database**: D1 (SQLite via Drizzle ORM)
 - **Validation**: Zod
+- **Build Tool**: Vite with @cloudflare/vite-plugin
+- **CLI**: Wrangler
 
 ## Project Structure
 
 ```
 ├── src/
-│   ├── config.ts           # Configuration management
-│   ├── index.ts            # Entry point
-│   ├── app.ts              # Express app setup
+│   ├── worker.ts              # Entry point
+│   ├── types.ts               # Type definitions
 │   ├── db/
-│   │   ├── index.ts        # Database connection
-│   │   └── schema.ts       # Database schema
+│   │   ├── index.ts           # Database connection
+│   │   └── schema.ts          # Database schema
 │   ├── lib/
-│   │   ├── logger.ts       # Logging setup
-│   │   └── auth.ts         # Authentication utilities
+│   │   ├── auth.ts            # Authentication utilities
+│   │   ├── config.ts          # Configuration management
+│   │   ├── logger.ts          # Logging setup
+│   │   └── ai.ts              # AI utilities
 │   ├── middleware/
-│   │   └── auth.ts         # Auth middleware
+│   │   └── validate.ts        # Request validation
 │   └── routes/
-│       ├── index.ts        # Route aggregator
-│       ├── auth.ts         # Auth routes
-│       ├── decks.ts        # Deck CRUD routes
-│       ├── cards.ts        # Card CRUD routes
-│       ├── health.ts       # Health check routes
-│       └── terminal.ts     # Terminal routes
-├── data/                   # SQLite database
-├── logs/                   # Log files
-├── workspaces/             # Terminal workspaces
+│       ├── auth.ts            # Auth routes
+│       ├── decks.ts           # Deck CRUD routes
+│       ├── cards.ts           # Card CRUD routes
+│       ├── health.ts          # Health check routes
+│       └── terminal.ts        # Terminal routes
+├── public/                    # Static assets
+├── migrations/                # D1 migrations
+├── wrangler.jsonc             # Wrangler configuration
+├── vite.config.ts             # Vite configuration
 ├── package.json
-├── tsconfig.json
-└── .env.example
+└── tsconfig.json
 ```
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js 20 or higher
+- Node.js 18 or higher
 - npm or pnpm
+- Wrangler CLI (`npm install -g wrangler`)
+- Cloudflare account
+- ngrok CLI (`npm install -g ngrok`)
 
 ### Installation
 
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd professional-api-server
+   cd mednexus-api
    ```
 
 2. **Install dependencies**
@@ -80,10 +84,15 @@ A standalone, professional backend API server with AI-powered features and self-
    npm install
    ```
 
-3. **Configure environment**
+3. **Configure secrets**
    ```bash
-   cp .env.example .env
-   # Edit .env with your settings
+   wrangler secret put OPENROUTER_API_KEY
+   wrangler secret put OPENAI_API_KEY
+   wrangler secret put GROQ_API_KEY
+   wrangler secret put OLLAMA_CLOUD_API_KEY
+   wrangler secret put MISTRAL_API_KEY
+   wrangler secret put GOOGLE_AI_API_KEY
+   wrangler secret put ADMIN_SECRET_KEY
    ```
 
 4. **Run in development mode**
@@ -94,22 +103,27 @@ A standalone, professional backend API server with AI-powered features and self-
 5. **Build for production**
    ```bash
    npm run build
-   npm start
+   ```
+
+6. **Deploy**
+   ```bash
+   npm run deploy
    ```
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NODE_ENV` | Environment mode | `development` |
-| `PORT` | Server port | `3001` |
-| `DATABASE_URL` | SQLite database path | `./data/sqlite.db` |
-| `OPENROUTER_API_KEY` | OpenRouter API key | - |
-| `OPENAI_API_KEY` | OpenAI API key | - |
-| `GROQ_API_KEY` | Groq API key | - |
-| `AI_TEXT_MODEL` | Model for text generation | `openrouter/anthropic/claude-3.5-sonnet:free` |
-| `ADMIN_SECRET_KEY` | Admin API key | - |
-| `FREE_MAX_DECKS` | Free tier deck limit | `10` |
+| `NODE_ENV` | Environment mode | `production` |
+| `FREE_MAX_DECKS` | Free tier deck limit | `100` |
+| `FREE_MAX_CARDS_PER_DECK` | Free tier card limit per deck | `200` |
+| `APP_URL` | Application URL | `https://mednexus.fit` |
+| `LOCAL_AI_URL` | Local AI server URL | `https://ai.mednexus.fit/v1` |
+| `AI_TEXT_MODEL` | Model for text generation | `local/qwen/qwen3.5-4b` |
+| `AI_VISION_MODEL` | Model for vision tasks | `local/qwen/qwen3.5-4b` |
+| `AI_QBANK_MODEL` | Model for Q&A | `local/qwen/qwen3.5-4b` |
+| `AI_EXPLAIN_MODEL` | Model for explanations | `local/qwen/qwen3.5-4b` |
+| `STUDY_BUDDY_MODEL` | Model for StudyPilot | `local/qwen/qwen3.5-4b` |
 
 ## API Endpoints
 
@@ -151,45 +165,75 @@ A standalone, professional backend API server with AI-powered features and self-
 - `GET /api/health` - Detailed health check
 - `GET /api/model-info` - AI model configuration
 
-## Usage Examples
+## Development
 
-### Create a Guest Session
+### Running Locally
+
 ```bash
-curl -X POST http://localhost:3001/api/auth/guest \
-  -c cookies.txt
+# Start development server
+npm run dev
+
+# Run type checking
+npm run typecheck
+
+# Run migrations
+npm run migrate:generate
+npm run migrate:apply:local
 ```
 
-### Create a Deck
-```bash
-curl -X POST http://localhost:3001/api/decks \
-  -b cookies.txt \
-  -H "Content-Type: application/json" \
-  -d '{"name": "My Deck", "description": "Study deck"}'
-```
+### Tunnel Setup (for LM Studio)
 
-### Create a Card
-```bash
-curl -X POST http://localhost:3001/api/cards \
-  -b cookies.txt \
-  -H "Content-Type: application/json" \
-  -d '{"deckId": 1, "front": "Question?", "back": "Answer!"}'
-```
+The project uses ngrok to expose your local LM Studio instance to Cloudflare Workers.
 
-### Execute Terminal Command
+1. **Ensure LM Studio is running** and serving its OpenAI-compatible `/v1` API at `http://192.168.100.99:1234`
+
+2. **Start the tunnel** (automatically installs ngrok if not found):
+   ```bash
+   npm run tunnel
+   ```
+
+   To skip ngrok and use direct connection (for local development or when ngrok is not needed):
+   ```bash
+   npm run tunnel:skip-ngrok
+   # Or: SKIP_NGROK=1 npm run tunnel
+   ```
+
+   To skip both ngrok and database tunnel (use local PostgreSQL, no Docker):
+   ```bash
+   npm run tunnel:local-db
+   # Or: SKIP_NGROK=1 SKIP_DB_TUNNEL=1 npm run tunnel
+   ```
+
+3. The script will:
+   - Start an ngrok tunnel pointing to your LM Studio server
+   - Update `wrangler.jsonc` with the tunnel URL
+   - Apply D1 migrations to the remote database
+   - Deploy the worker
+
+4. **Environment Variables**:
+   | Variable | Description | Default |
+   |----------|-------------|---------|
+   | `TUNNEL_TARGET` | Override LM Studio URL | `http://192.168.100.99:1234` |
+   | `SKIP_DEPLOY` | Skip worker deployment | - |
+   | `SKIP_MIGRATE` | Skip database migrations | - |
+   | `SKIP_NGROK` | Skip ngrok tunnel (use direct connection) | - |
+   | `SKIP_DB_TUNNEL` | Skip database tunnel setup | - |
+
+### Testing
+
 ```bash
-curl -X POST http://localhost:3001/api/terminal/exec \
-  -H "Content-Type: application/json" \
-  -d '{"command": "ls -la", "sessionId": "session-id"}'
+# Run tests
+npm test
 ```
 
 ## Security Features
 
 - Session-based authentication with HTTP-only cookies
-- CORS protection
-- Helmet.js security headers
-- Command injection prevention in terminal
-- Workspace isolation for terminal sessions
 - Input validation with Zod
+- Admin key required for admin endpoints
+- Workspace isolation for terminal sessions
+- Command injection prevention in terminal
+- Security headers (X-Content-Type-Options, X-Frame-Options, X-XSS-Protection)
 
 ## License
 

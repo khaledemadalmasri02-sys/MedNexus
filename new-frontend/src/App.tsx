@@ -28,20 +28,9 @@ const DeckDetail = lazy(() => import("./pages/DeckDetail"));
 const VerifyEmail = lazy(() => import("./pages/VerifyEmail"));
 const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
 const Chat = lazy(() => import("./pages/Chat"));
-const SmartReview = lazy(() => import("./pages/SmartReview"));
-const DeckDoctor = lazy(() => import("./pages/DeckDoctor"));
-const Exam = lazy(() => import("./pages/Exam"));
-const Summarize = lazy(() => import("./pages/Summarize"));
-const Mnemonics = lazy(() => import("./pages/Mnemonics"));
-const Coach = lazy(() => import("./pages/Coach"));
-const StudyPilot = lazy(() => import("./pages/StudyPilot"));
-const ImageAnalyze = lazy(() => import("./pages/ImageAnalyze"));
-const VoiceStudy = lazy(() => import("./pages/VoiceStudy"));
-const GroupStudy = lazy(() => import("./pages/GroupStudy"));
 const ProfilePage = lazy(() => import("./pages/Profile"));
 const AchievementsPage = lazy(() => import("./pages/Achievements"));
 const HelpPage = lazy(() => import("./pages/Help"));
-const DrollingGame = lazy(() => import("./pages/DrollingGame"));
 const Agents = lazy(() => import("./pages/Agents"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const AdminPage = lazy(() => import("./pages/Admin"));
@@ -148,56 +137,6 @@ function AnimatedRoutes() {
               <Suspense fallback={<PageLoader />}><Chat /></Suspense>
             </ErrorBoundary>
           } />
-          <Route path="/smart-review" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><SmartReview /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/deck/:id/doctor" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><DeckDoctor /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/exam" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><Exam /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/summarize" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><Summarize /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/mnemonics" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><Mnemonics /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/coach" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><Coach /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/studypilot" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><StudyPilot /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/image-analyze" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><ImageAnalyze /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/voice-study" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><VoiceStudy /></Suspense>
-            </ErrorBoundary>
-          } />
-          <Route path="/group-study" element={
-            <ErrorBoundary>
-              <Suspense fallback={<PageLoader />}><GroupStudy /></Suspense>
-            </ErrorBoundary>
-          } />
           <Route path="/profile" element={
             <ErrorBoundary>
               <Suspense fallback={<PageLoader />}><ProfilePage /></Suspense>
@@ -208,39 +147,34 @@ function AnimatedRoutes() {
               <Suspense fallback={<PageLoader />}><AchievementsPage /></Suspense>
             </ErrorBoundary>
           } />
-<Route path="/help" element={
-          <ErrorBoundary>
-            <Suspense fallback={<PageLoader />}><HelpPage /></Suspense>
-          </ErrorBoundary>
-        } />
-        <Route path="/game" element={
-          <ErrorBoundary>
-            <Suspense fallback={<PageLoader />}><DrollingGame /></Suspense>
-          </ErrorBoundary>
-        } />
-         <Route path="/agents" element={
-           <ErrorBoundary>
-             <Suspense fallback={<PageLoader />}><Agents /></Suspense>
-           </ErrorBoundary>
-         } />
-         <Route path="/download" element={
-           <ErrorBoundary>
-             <Suspense fallback={<PageLoader />}><DownloadPage /></Suspense>
-           </ErrorBoundary>
-         } />
-         <Route path="/articles">
-           <Route index element={
-             <ErrorBoundary>
-               <Suspense fallback={<PageLoader />}><Articles /></Suspense>
-             </ErrorBoundary>
-           } />
-           <Route path=":id" element={
-             <ErrorBoundary>
-               <Suspense fallback={<PageLoader />}><ArticleRead /></Suspense>
-             </ErrorBoundary>
-           } />
-         </Route>
-        <Route path="*" element={<NotFound />} />
+          <Route path="/help" element={
+            <ErrorBoundary>
+              <Suspense fallback={<PageLoader />}><HelpPage /></Suspense>
+            </ErrorBoundary>
+          } />
+          <Route path="/agents" element={
+            <ErrorBoundary>
+              <Suspense fallback={<PageLoader />}><Agents /></Suspense>
+            </ErrorBoundary>
+          } />
+          <Route path="/download" element={
+            <ErrorBoundary>
+              <Suspense fallback={<PageLoader />}><DownloadPage /></Suspense>
+            </ErrorBoundary>
+          } />
+          <Route path="/articles">
+            <Route index element={
+              <ErrorBoundary>
+                <Suspense fallback={<PageLoader />}><Articles /></Suspense>
+              </ErrorBoundary>
+            } />
+            <Route path=":id" element={
+              <ErrorBoundary>
+                <Suspense fallback={<PageLoader />}><ArticleRead /></Suspense>
+              </ErrorBoundary>
+            } />
+          </Route>
+          <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
       </AnimatePresence>
